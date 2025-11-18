@@ -7,7 +7,7 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.1"
+VERSION = "4.2"
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -29,7 +29,7 @@ def format_currency_ar(value):
     try:
         v = float(value)
     except Exception:
-        return value if value is not None else ''
+        return '' if value is None else str(value)
     sign = '-' if v < 0 else ''
     v_abs = abs(v)
     s = f"{v_abs:,.2f}"            # 1,234,567.89
@@ -41,6 +41,7 @@ def format_date_iso(d):
     if pd.isna(d):
         return ''
     try:
+        # si ya es Timestamp o datetime
         return f"{d.year}-{d.month:02d}-{d.day:02d}"
     except Exception:
         try:
@@ -147,7 +148,7 @@ if file_personas and file_banco and run_button:
         df_detalle['Fecha_str'] = df_detalle['Fecha'].apply(format_date_iso)
 
         # columna Valor formateada (estilo argentino)
-        df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else (str(x) if x is not None else ''))
+        df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
 
         # Tabla detalle: Fecha primero
         df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote','Golf','Valor_formateado','Concepto encontrado']].copy()
@@ -167,54 +168,74 @@ if file_personas and file_banco and run_button:
         resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
         resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
 
-        # CORRECCIÓN: ordenar antes de seleccionar columnas para mostrar
+        # ordenar antes de mostrar
         res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
+
         st.subheader("Resumen (suma por Cuit/Cuil)")
         st.dataframe(res_sorted[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
 
-        # ---------- Buscador por Lote ----------
-        st.markdown("---")
-        st.subheader("Buscar por Lote (resalta coincidencias)")
-        search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value="", key="search_lote")
-        if search_lote:
-            search_lower = str(search_lote).strip().lower()
-            # Filas del detalle que coinciden
-            mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
-            matches_det = df_detalle_display[mask_det]
-            count_det = len(matches_det)
-
-            # Filas del resumen que coinciden (usar res_sorted)
-            mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
-            matches_res = res_sorted[mask_res]
-            count_res = len(matches_res)
-
-            st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
-
-            if count_det > 0:
-                # Resaltar filas en detalle usando Styler (solo las coincidencias)
-                styled_det = matches_det.style.apply(
-                    lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index],
-                    axis=1
-                )
-                st.markdown("**Detalle (filtrado por lote)**")
-                st.dataframe(styled_det)
-            else:
-                st.info("No se encontraron filas en el detalle para ese lote.")
-
-            if count_res > 0:
-                matches_res_display = matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].copy()
-                styled_res = matches_res_display.style.apply(
-                    lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index],
-                    axis=1
-                )
-                st.markdown("**Resumen (filtrado por lote)**")
-                st.dataframe(styled_res)
-            else:
-                st.info("No se encontraron filas en el resumen para ese lote.")
+        # Guardar resultados en session_state para persistir entre reruns
+        st.session_state['df_detalle_display'] = df_detalle_display
+        st.session_state['res_sorted'] = res_sorted
 
     st.success("Procesamiento finalizado.")
+
+# ---------- Buscador por Lote persistente ----------
+st.markdown("---")
+st.subheader("Buscar por Lote (resalta coincidencias)")
+
+# Botón para resetear resultados guardados
+if st.button("Resetear resultados"):
+    for k in ['df_detalle_display','res_sorted']:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.experimental_rerun()
+
+if 'df_detalle_display' in st.session_state and 'res_sorted' in st.session_state:
+    df_detalle_display = st.session_state['df_detalle_display']
+    res_sorted = st.session_state['res_sorted']
+
+    search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value="", key="search_lote")
+    if search_lote:
+        search_lower = str(search_lote).strip().lower()
+        # Filas del detalle que coinciden
+        mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+        matches_det = df_detalle_display[mask_det]
+        count_det = len(matches_det)
+
+        # Filas del resumen que coinciden (usar res_sorted)
+        mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+        matches_res = res_sorted[mask_res]
+        count_res = len(matches_res)
+
+        st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
+
+        if count_det > 0:
+            # Resaltar filas en detalle usando Styler
+            def highlight_det(row):
+                return ['background-color: yellow' if search_lower in str(row['Lote']).lower() else '' for _ in row.index]
+
+            styled_det = matches_det.style.apply(highlight_det, axis=1)
+            st.markdown("**Detalle (filtrado por lote)**")
+            st.dataframe(styled_det)
+        else:
+            st.info("No se encontraron filas en el detalle para ese lote.")
+
+        if count_res > 0:
+            matches_res_display = matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].copy()
+
+            def highlight_res(row):
+                return ['background-color: yellow' if search_lower in str(row['Lote']).lower() else '' for _ in row.index]
+
+            styled_res = matches_res_display.style.apply(highlight_res, axis=1)
+            st.markdown("**Resumen (filtrado por lote)**")
+            st.dataframe(styled_res)
+        else:
+            st.info("No se encontraron filas en el resumen para ese lote.")
+else:
+    st.info("Procesa archivos primero para habilitar la búsqueda por lote.")
 
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.1
+# Versión: 4.2
