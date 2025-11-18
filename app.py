@@ -2,7 +2,6 @@
 import streamlit as st
 import pandas as pd
 import re
-from io import StringIO
 
 st.set_page_config(page_title="Buscar CUIT en movimientos bancarios", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios y sumar por CUIT")
@@ -23,7 +22,6 @@ def read_excel_bytes(uploaded_file):
     return pd.read_excel(uploaded_file, dtype=str, engine="openpyxl").fillna('')
 
 def format_currency_ar(value):
-    """Formatea número al estilo argentino: miles con punto y decimales con coma (2 decimales)."""
     try:
         v = float(value)
     except Exception:
@@ -34,13 +32,13 @@ def format_currency_ar(value):
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
-def agg_dates(series):
-    dates = [d for d in series if pd.notna(d)]
-    if not dates:
+def format_date_iso_nozero(d):
+    if pd.isna(d):
         return ''
-    # formatear y ordenar únicos
-    dates_str = sorted({d.strftime('%d/%m/%Y') for d in dates})
-    return '; '.join(dates_str)
+    try:
+        return f"{d.year}-{d.month}-{d.day:02d}"
+    except Exception:
+        return str(d)
 
 def agg_concepts(series):
     concepts = [str(c).strip() for c in series if pd.notna(c) and str(c).strip()!='']
@@ -49,6 +47,56 @@ def agg_concepts(series):
         if c not in unique:
             unique.append(c)
     return '; '.join(unique)
+
+def agg_dates_iso(series):
+    dates = [d for d in series if pd.notna(d)]
+    if not dates:
+        return ''
+    unique = sorted({format_date_iso_nozero(d) for d in dates})
+    return '; '.join(unique)
+
+def agg_names(series):
+    names = []
+    for item in series:
+        if pd.isna(item):
+            continue
+        # item puede ser string con saltos o lista
+        if isinstance(item, list):
+            for n in item:
+                if n and n not in names:
+                    names.append(n)
+        else:
+            s = str(item).strip()
+            if s:
+                # si contiene saltos, separar
+                parts = [p.strip() for p in s.split('\n') if p.strip()]
+                for p in parts:
+                    if p not in names:
+                        names.append(p)
+    return '\n'.join(names)
+
+def extract_names_from_concept(concept, cuit_digits):
+    """Intenta extraer nombres en mayúsculas cercanos al CUIT dentro del texto del concepto."""
+    if not concept or not cuit_digits:
+        return []
+    found_names = []
+    # buscar ocurrencias del CUIT y tomar el texto que sigue (hasta 80 chars)
+    for m in re.finditer(re.escape(cuit_digits), concept):
+        start = m.end()
+        tail = concept[start:start+80]
+        # buscar secuencias en mayúsculas (nombres típicos en los ejemplos)
+        caps = re.findall(r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{1,60})', tail)
+        for c in caps:
+            c_clean = c.strip(' -:;')
+            if len(c_clean) > 1 and c_clean not in found_names:
+                found_names.append(c_clean)
+    # también buscar secuencias mayúsculas en todo el concepto (por si no está justo después)
+    caps_all = re.findall(r'([A-ZÁÉÍÓÚÑ][A-ZÁÉÍÓÚÑ\s]{2,60})', concept)
+    for c in caps_all:
+        c_clean = c.strip(' -:;')
+        if len(c_clean) > 1 and c_clean not in found_names and cuit_digits not in c_clean:
+            found_names.append(c_clean)
+    return found_names
 
 # ---------- UI ----------
 col1, col2 = st.columns(2)
@@ -131,7 +179,6 @@ if file_personas and file_banco and run_button:
         concepto = str(row.get(concepto_col, ''))
         fecha_val = row.get(fecha_col, '') if fecha_col else ''
         credito_val = row.get(credito_col, '') if credito_col else ''
-        # normalizar credito a número (usar punto decimal)
         credito_num = pd.to_numeric(str(credito_val).replace('.','').replace(',','.'), errors='coerce')
 
         matches = []
@@ -162,16 +209,19 @@ if file_personas and file_banco and run_button:
             nombre = digits_to_nombre.get(matched_digits, '')
             lote = digits_to_lote.get(matched_digits, '')
             golf = digits_to_golf.get(matched_digits, '')
-            etiqueta = lote if str(lote).strip() else golf if str(golf).strip() else ''
             fecha_parsed = pd.to_datetime(fecha_val, errors='coerce')
+            # extraer nombres adicionales desde el concepto
+            nombres_extra = extract_names_from_concept(concepto, matched_digits)
             resultados.append({
                 'Cuit/Cuil': cuit_raw,
                 'Nombre': nombre,
-                'Lote o Golf': etiqueta,
+                'Lote': lote,
+                'Golf': golf,
                 'Fecha': fecha_parsed,
                 'Valor transferido': credito_val,
                 'Valor_num': credito_num,
-                'Concepto encontrado': concepto
+                'Concepto encontrado': concepto,
+                'Nombres_extra': nombres_extra
             })
 
         if total_rows:
@@ -186,45 +236,57 @@ if file_personas and file_banco and run_button:
         df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], errors='coerce')
         df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
 
-        # Columna de visualización del valor con formato argentino
-        def valor_display(row):
-            if pd.notna(row['Valor_num']):
-                return format_currency_ar(row['Valor_num'])
-            else:
-                return str(row['Valor transferido'])
-        df_detalle['Valor_formateado'] = df_detalle.apply(valor_display, axis=1)
+        # Formatear valor para mostrar
+        df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
+
+        # Fecha como string YYYY-M-DD (ejemplo 2025-1-09)
+        df_detalle['Fecha_str'] = df_detalle['Fecha'].apply(format_date_iso_nozero)
 
         # Tabla detalle: Fecha primero
-        df_detalle_display = df_detalle[['Fecha', 'Cuit/Cuil', 'Nombre', 'Lote o Golf', 'Valor_formateado', 'Concepto encontrado']].copy()
-        df_detalle_display = df_detalle_display.rename(columns={'Valor_formateado': 'Valor transferido'})
+        df_detalle_display = df_detalle[['Fecha_str', 'Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Valor_formateado', 'Concepto encontrado']].copy()
+        df_detalle_display = df_detalle_display.rename(columns={
+            'Fecha_str': 'Fecha',
+            'Valor_formateado': 'Valor transferido'
+        })
 
         st.subheader("Detalle de coincidencias (Fecha primero)")
         st.dataframe(df_detalle_display)
 
-        # Resumen por Cuit/Cuil: una fila por Cuit, listar conceptos y fechas, sumar valores
-        resumen = df_detalle.groupby(['Cuit/Cuil', 'Nombre', 'Lote o Golf'], as_index=False).agg({
-            'Fecha': agg_dates,
+        # Resumen por Cuit/Cuil: una fila por Cuit
+        resumen = df_detalle.groupby('Cuit/Cuil').agg({
+            'Nombre': lambda s: '\n'.join(dict.fromkeys([x for x in s if x and str(x).strip()])),
+            'Lote': lambda s: '; '.join([x for x in dict.fromkeys([str(x).strip() for x in s if x and str(x).strip()])]),
+            'Golf': lambda s: '; '.join([x for x in dict.fromkeys([str(x).strip() for x in s if x and str(x).strip()])]),
+            'Fecha': agg_dates_iso,
             'Concepto encontrado': agg_concepts,
-            'Valor_num': 'sum'
-        })
-        resumen = resumen.rename(columns={
-            'Fecha': 'Fechas',
-            'Concepto encontrado': 'Conceptos',
-            'Valor_num': 'Suma total (num)'
-        })
-        # Formatear suma para mostrar
+            'Valor_num': 'sum',
+            'Nombres_extra': agg_names
+        }).reset_index()
+
+        # Combinar nombres de personas y nombres extra (cada uno en nueva línea)
+        def combine_names(row):
+            persona_names = row['Nombre'].split('\n') if row['Nombre'] else []
+            extra = row['Nombres_extra'].split('\n') if row['Nombres_extra'] else []
+            combined = []
+            for n in persona_names + extra:
+                n = n.strip()
+                if n and n not in combined:
+                    combined.append(n)
+            return '\n'.join(combined)
+
+        resumen['Nombres'] = resumen.apply(combine_names, axis=1)
+        resumen['Suma total (num)'] = resumen['Valor_num']
         resumen['Suma total'] = resumen['Suma total (num)'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
-        resumen_display = resumen[['Cuit/Cuil', 'Nombre', 'Lote o Golf', 'Fechas', 'Conceptos', 'Suma total']]
+
+        resumen_display = resumen[['Cuit/Cuil', 'Nombres', 'Lote', 'Golf', 'Fecha', 'Concepto encontrado', 'Suma total']].copy()
+        resumen_display = resumen_display.rename(columns={'Concepto encontrado': 'Conceptos', 'Fecha': 'Fechas'})
 
         st.subheader("Resumen por Cuit/Cuil (una fila por Cuit)")
         st.dataframe(resumen_display.sort_values('Suma total (num)', ascending=False))
 
-        # Descargas CSV (opcional)
+        # Descargas CSV
         csv_detalle = df_detalle_display.copy()
-        # convertir Fecha a dd/mm/YYYY para CSV
-        csv_detalle['Fecha'] = csv_detalle['Fecha'].dt.strftime('%d/%m/%Y')
         st.download_button("Descargar detalle CSV", data=csv_detalle.to_csv(index=False), file_name="detalle_coincidencias.csv", mime="text/csv")
-
         csv_resumen = resumen_display.copy()
         st.download_button("Descargar resumen CSV", data=csv_resumen.to_csv(index=False), file_name="resumen_por_cuit.csv", mime="text/csv")
 
