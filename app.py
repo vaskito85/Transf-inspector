@@ -1,13 +1,15 @@
 # streamlit_app.py
-import streamlit as st
-import pandas as pd
+import io
 import re
+
+import pandas as pd
+import streamlit as st
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.2"
+VERSION = "4.3"
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -22,7 +24,42 @@ def only_digits(s):
 
 @st.cache_data
 def read_excel_bytes(uploaded_file):
-    return pd.read_excel(uploaded_file, dtype=str, engine="openpyxl").fillna('')
+    """
+    Lee .xls y .xlsx a DataFrame con dtype=str y rellena NaN con ''.
+    - Detecta extensión por uploaded_file.name.
+    - Lee .xls con xlrd (si está disponible) y reescribe en memoria a .xlsx para normalizar lectura.
+    - Usa openpyxl para .xlsx.
+    - Fallback: dejar que pandas escoja el engine si falla.
+    """
+    name = getattr(uploaded_file, "name", "") or ""
+    ext = name.split('.')[-1].lower()
+    data = uploaded_file.read()
+    buf = io.BytesIO(data)
+
+    try:
+        if ext == "xlsx":
+            return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
+        elif ext == "xls":
+            # Intento directo con xlrd; si falla, usamos fallback de pandas
+            try:
+                df = pd.read_excel(buf, dtype=str, engine="xlrd")
+            except Exception:
+                buf.seek(0)
+                df = pd.read_excel(buf, dtype=str)  # pandas intentará escoger engine
+            # Reescribimos a buffer xlsx para garantizar comportamiento uniforme
+            out = io.BytesIO()
+            with pd.ExcelWriter(out, engine="openpyxl") as writer:
+                df.to_excel(writer, index=False)
+            out.seek(0)
+            return pd.read_excel(out, dtype=str, engine="openpyxl").fillna('')
+        else:
+            # extensión desconocida: fallback
+            buf.seek(0)
+            return pd.read_excel(buf, dtype=str).fillna('')
+    except Exception:
+        # último recurso: reintentar sin forzar engine
+        buf.seek(0)
+        return pd.read_excel(buf, dtype=str).fillna('')
 
 def format_currency_ar(value):
     """Formatea número al estilo argentino: miles con punto y decimales con coma (2 decimales)."""
@@ -55,9 +92,17 @@ def format_date_iso(d):
 # ---------- UI: subida ----------
 col1, col2 = st.columns(2)
 with col1:
-    file_personas = st.file_uploader("Sube Excel con Cuit/Cuil, Nombre, Lote, Golf", type=["xlsx"], key="personas")
+    file_personas = st.file_uploader(
+        "Sube Excel con Cuit/Cuil, Nombre, Lote, Golf",
+        type=["xls", "xlsx"],
+        key="personas"
+    )
 with col2:
-    file_banco = st.file_uploader("Sube Excel de movimientos (Concepto, Fecha, Crédito)", type=["xlsx"], key="banco")
+    file_banco = st.file_uploader(
+        "Sube Excel de movimientos (Concepto, Fecha, Crédito)",
+        type=["xls", "xlsx"],
+        key="banco"
+    )
 
 run_button = st.button("Procesar archivos")
 
@@ -99,9 +144,9 @@ if file_personas and file_banco and run_button:
     total_personas = len(personas)
     progress = st.progress(0)
     for idx, p in personas.iterrows():
-        cuit_raw = str(p.get('cuit_raw','')).strip()
+        cuit_raw = str(p.get('cuit_raw', '')).strip()
         if not cuit_raw:
-            progress.progress(int((idx+1)/total_personas*100))
+            progress.progress(int((idx + 1) / total_personas * 100))
             continue
         cuit_digits = only_digits(cuit_raw)
         nombre = p.get(nombre_col, '') if nombre_col else ''
@@ -115,9 +160,15 @@ if file_personas and file_banco and run_button:
         matches = banco[mask]
 
         for _, m in matches.iterrows():
-            credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
-            # normalizar número (usar punto decimal interno)
-            credito_num = pd.to_numeric(str(credito_val).replace('.','').replace(',','.'), errors='coerce')
+            credito_val = m.get(credito_col, m.get('Credito', '')) if credito_col else m.get('Credito', '')
+            # normalizar número (heurística robusta)
+            credito_str = str(credito_val).strip()
+            credito_str = re.sub(r'[^\d,.\-]', '', credito_str)
+            if credito_str.count(',') == 1 and credito_str.count('.') == 0:
+                credito_norm = credito_str.replace('.', '').replace(',', '.')
+            else:
+                credito_norm = credito_str.replace(',', '')
+            credito_num = pd.to_numeric(credito_norm, errors='coerce')
             fecha_val = m.get(fecha_col, '') if fecha_col else ''
             fecha_dt = pd.to_datetime(fecha_val, errors='coerce')
 
@@ -133,7 +184,7 @@ if file_personas and file_banco and run_button:
             })
 
         if total_personas:
-            progress.progress(int((idx+1)/total_personas*100))
+            progress.progress(int((idx + 1) / total_personas * 100))
     progress.empty()
 
     df_detalle = pd.DataFrame(resultados)
@@ -151,7 +202,7 @@ if file_personas and file_banco and run_button:
         df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
 
         # Tabla detalle: Fecha primero
-        df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote','Golf','Valor_formateado','Concepto encontrado']].copy()
+        df_detalle_display = df_detalle[['Fecha_str', 'Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Valor_formateado', 'Concepto encontrado']].copy()
         df_detalle_display = df_detalle_display.rename(columns={
             'Fecha_str': 'Fecha',
             'Valor_formateado': 'Valor transferido'
@@ -163,16 +214,16 @@ if file_personas and file_banco and run_button:
         # Resumen simple: suma por Cuit/Cuil, Nombre, Lote, Golf
         df_resumen = df_detalle.copy()
         df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
-        resumen = df_resumen.groupby(['Cuit/Cuil','Nombre','Lote','Golf'], as_index=False)['Valor_num'].sum()
-        resumen = resumen.rename(columns={'Valor_num':'Suma_total_num'})
+        resumen = df_resumen.groupby(['Cuit/Cuil', 'Nombre', 'Lote', 'Golf'], as_index=False)['Valor_num'].sum()
+        resumen = resumen.rename(columns={'Valor_num': 'Suma_total_num'})
         resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
-        resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
+        resumen_display = resumen[['Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Suma total', 'Suma_total_num']].copy()
 
         # ordenar antes de mostrar
         res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
         st.subheader("Resumen (suma por Cuit/Cuil)")
-        st.dataframe(res_sorted[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
+        st.dataframe(res_sorted[['Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Suma total']])
 
         # Guardar resultados en session_state para persistir entre reruns
         st.session_state['df_detalle_display'] = df_detalle_display
@@ -186,7 +237,7 @@ st.subheader("Buscar por Lote (resalta coincidencias)")
 
 # Botón para resetear resultados guardados
 if st.button("Resetear resultados"):
-    for k in ['df_detalle_display','res_sorted']:
+    for k in ['df_detalle_display', 'res_sorted']:
         if k in st.session_state:
             del st.session_state[k]
     st.experimental_rerun()
@@ -222,7 +273,7 @@ if 'df_detalle_display' in st.session_state and 'res_sorted' in st.session_state
             st.info("No se encontraron filas en el detalle para ese lote.")
 
         if count_res > 0:
-            matches_res_display = matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].copy()
+            matches_res_display = matches_res[['Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Suma total']].copy()
 
             def highlight_res(row):
                 return ['background-color: yellow' if search_lower in str(row['Lote']).lower() else '' for _ in row.index]
@@ -238,4 +289,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.2
+# Versión: 4.3
