@@ -43,7 +43,6 @@ def format_date_iso(d):
     try:
         return f"{d.year}-{d.month:02d}-{d.day:02d}"
     except Exception:
-        # si no es datetime, intentar parsear
         try:
             dt = pd.to_datetime(d, errors='coerce')
             if pd.isna(dt):
@@ -168,8 +167,10 @@ if file_personas and file_banco and run_button:
         resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
         resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
 
+        # CORRECCIÓN: ordenar antes de seleccionar columnas para mostrar
+        res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
         st.subheader("Resumen (suma por Cuit/Cuil)")
-        st.dataframe(resumen_display[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].sort_values('Suma_total_num', ascending=False))
+        st.dataframe(res_sorted[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
 
         # ---------- Buscador por Lote ----------
         st.markdown("---")
@@ -182,29 +183,30 @@ if file_personas and file_banco and run_button:
             matches_det = df_detalle_display[mask_det]
             count_det = len(matches_det)
 
-            # Filas del resumen que coinciden
-            mask_res = resumen_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
-            matches_res = resumen_display[mask_res]
+            # Filas del resumen que coinciden (usar res_sorted)
+            mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+            matches_res = res_sorted[mask_res]
             count_res = len(matches_res)
 
             st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
 
             if count_det > 0:
-                # Resaltar filas en detalle usando Styler
-                def highlight_lote(row):
-                    return ['background-color: yellow' if (str(row['Lote']).lower().find(search_lower) != -1) else '' for _ in row.index]
-
-                styled_det = matches_det.style.apply(lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index], axis=1)
+                # Resaltar filas en detalle usando Styler (solo las coincidencias)
+                styled_det = matches_det.style.apply(
+                    lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index],
+                    axis=1
+                )
                 st.markdown("**Detalle (filtrado por lote)**")
-                st.dataframe(styled_det)  # Streamlit acepta Styler en st.dataframe
-
+                st.dataframe(styled_det)
             else:
                 st.info("No se encontraron filas en el detalle para ese lote.")
 
             if count_res > 0:
-                # Resaltar filas en resumen usando Styler
                 matches_res_display = matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].copy()
-                styled_res = matches_res_display.style.apply(lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index], axis=1)
+                styled_res = matches_res_display.style.apply(
+                    lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index],
+                    axis=1
+                )
                 st.markdown("**Resumen (filtrado por lote)**")
                 st.dataframe(styled_res)
             else:
