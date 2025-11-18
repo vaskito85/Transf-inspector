@@ -1,7 +1,6 @@
 # streamlit_app.py
 import io
 import re
-
 import pandas as pd
 import streamlit as st
 
@@ -9,7 +8,7 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.3"
+VERSION = "4.4"
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -24,13 +23,7 @@ def only_digits(s):
 
 @st.cache_data
 def read_excel_bytes(uploaded_file):
-    """
-    Lee .xls y .xlsx a DataFrame con dtype=str y rellena NaN con ''.
-    - Detecta extensión por uploaded_file.name.
-    - Lee .xls con xlrd (si está disponible) y reescribe en memoria a .xlsx para normalizar lectura.
-    - Usa openpyxl para .xlsx.
-    - Fallback: dejar que pandas escoja el engine si falla.
-    """
+    """Lee .xls o .xlsx y normaliza como DataFrame con dtype=str."""
     name = getattr(uploaded_file, "name", "") or ""
     ext = name.split('.')[-1].lower()
     data = uploaded_file.read()
@@ -40,12 +33,9 @@ def read_excel_bytes(uploaded_file):
         if ext == "xlsx":
             return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
         elif ext == "xls":
-            # Intento directo con xlrd; si falla, usamos fallback de pandas
-            try:
-                df = pd.read_excel(buf, dtype=str, engine="xlrd")
-            except Exception:
-                buf.seek(0)
-                df = pd.read_excel(buf, dtype=str)  # pandas intentará escoger engine
+            buf.seek(0)
+            # Dejar que pandas intente leer .xls; muchas instalaciones actuales usan engines soportados
+            df = pd.read_excel(buf, dtype=str).fillna('')
             # Reescribimos a buffer xlsx para garantizar comportamiento uniforme
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine="openpyxl") as writer:
@@ -53,32 +43,27 @@ def read_excel_bytes(uploaded_file):
             out.seek(0)
             return pd.read_excel(out, dtype=str, engine="openpyxl").fillna('')
         else:
-            # extensión desconocida: fallback
             buf.seek(0)
             return pd.read_excel(buf, dtype=str).fillna('')
-    except Exception:
-        # último recurso: reintentar sin forzar engine
-        buf.seek(0)
-        return pd.read_excel(buf, dtype=str).fillna('')
+    except Exception as e:
+        st.error(f"Error leyendo archivo: {e}")
+        st.stop()
 
 def format_currency_ar(value):
-    """Formatea número al estilo argentino: miles con punto y decimales con coma (2 decimales)."""
     try:
         v = float(value)
     except Exception:
         return '' if value is None else str(value)
     sign = '-' if v < 0 else ''
     v_abs = abs(v)
-    s = f"{v_abs:,.2f}"            # 1,234,567.89
+    s = f"{v_abs:,.2f}"
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
 def format_date_iso(d):
-    """Formatea fecha a YYYY-MM-DD (con ceros a la izquierda)."""
     if pd.isna(d):
         return ''
     try:
-        # si ya es Timestamp o datetime
         return f"{d.year}-{d.month:02d}-{d.day:02d}"
     except Exception:
         try:
@@ -108,14 +93,9 @@ run_button = st.button("Procesar archivos")
 
 # ---------- procesamiento ----------
 if file_personas and file_banco and run_button:
-    try:
-        personas = read_excel_bytes(file_personas)
-        banco = read_excel_bytes(file_banco)
-    except Exception as e:
-        st.error(f"Error leyendo archivos: {e}")
-        st.stop()
+    personas = read_excel_bytes(file_personas)
+    banco = read_excel_bytes(file_banco)
 
-    # detectar columnas en banco
     concepto_col = find_col(banco, ['concepto', 'concept'])
     credito_col = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
     fecha_col = find_col(banco, ['fecha', 'date', 'fecha de'])
@@ -123,45 +103,40 @@ if file_personas and file_banco and run_button:
         st.error("No se encontró la columna 'Concepto' en el archivo bancario.")
         st.stop()
 
-    # detectar columnas en personas
     cuit_col = find_col(personas, ['cuit', 'cuil'])
     nombre_col = find_col(personas, ['nombre', 'name'])
     lote_col = find_col(personas, ['lote'])
     golf_col = find_col(personas, ['golf'])
-
     if not cuit_col:
         st.error("No se encontró la columna 'Cuit/Cuil' en el archivo de personas.")
         st.stop()
 
-    # preparar datos
     personas['cuit_raw'] = personas[cuit_col].astype(str).str.strip()
     personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
-
     banco['Concepto_str'] = banco[concepto_col].astype(str)
     banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
 
     resultados = []
-    total_personas = len(personas)
+    total_personas = len(personas) if len(personas) > 0 else 1
     progress = st.progress(0)
+
     for idx, p in personas.iterrows():
-        cuit_raw = str(p.get('cuit_raw', '')).strip()
+        cuit_raw = str(p.get('cuit_raw','')).strip()
         if not cuit_raw:
-            progress.progress(int((idx + 1) / total_personas * 100))
+            progress.progress(int((idx+1)/total_personas*100))
             continue
         cuit_digits = only_digits(cuit_raw)
         nombre = p.get(nombre_col, '') if nombre_col else ''
         lote = p.get(lote_col, '') if lote_col else ''
         golf = p.get(golf_col, '') if golf_col else ''
 
-        # buscar por texto y por dígitos
         mask_text = banco['Concepto_str'].str.contains(cuit_raw, case=False, na=False, regex=False)
         mask_digits = banco['Concepto_digits'].str.contains(cuit_digits, na=False, regex=False) if cuit_digits else False
         mask = mask_text | mask_digits
         matches = banco[mask]
 
         for _, m in matches.iterrows():
-            credito_val = m.get(credito_col, m.get('Credito', '')) if credito_col else m.get('Credito', '')
-            # normalizar número (heurística robusta)
+            credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
             credito_str = str(credito_val).strip()
             credito_str = re.sub(r'[^\d,.\-]', '', credito_str)
             if credito_str.count(',') == 1 and credito_str.count('.') == 0:
@@ -183,49 +158,34 @@ if file_personas and file_banco and run_button:
                 'Concepto encontrado': m.get(concepto_col, '')
             })
 
-        if total_personas:
-            progress.progress(int((idx + 1) / total_personas * 100))
+        progress.progress(int((idx+1)/total_personas*100))
     progress.empty()
 
     df_detalle = pd.DataFrame(resultados)
     if df_detalle.empty:
         st.info("No se encontraron coincidencias.")
     else:
-        # ordenar y preparar columnas de visualización
         df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], errors='coerce')
         df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
-
-        # columna Fecha en formato YYYY-MM-DD
         df_detalle['Fecha_str'] = df_detalle['Fecha'].apply(format_date_iso)
-
-        # columna Valor formateada (estilo argentino)
         df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
-
-        # Tabla detalle: Fecha primero
-        df_detalle_display = df_detalle[['Fecha_str', 'Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Valor_formateado', 'Concepto encontrado']].copy()
-        df_detalle_display = df_detalle_display.rename(columns={
-            'Fecha_str': 'Fecha',
-            'Valor_formateado': 'Valor transferido'
-        })
+        df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote','Golf','Valor_formateado','Concepto encontrado']].copy()
+        df_detalle_display = df_detalle_display.rename(columns={'Fecha_str': 'Fecha','Valor_formateado': 'Valor transferido'})
 
         st.subheader("Detalle de coincidencias")
         st.dataframe(df_detalle_display)
 
-        # Resumen simple: suma por Cuit/Cuil, Nombre, Lote, Golf
         df_resumen = df_detalle.copy()
         df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
-        resumen = df_resumen.groupby(['Cuit/Cuil', 'Nombre', 'Lote', 'Golf'], as_index=False)['Valor_num'].sum()
-        resumen = resumen.rename(columns={'Valor_num': 'Suma_total_num'})
+        resumen = df_resumen.groupby(['Cuit/Cuil','Nombre','Lote','Golf'], as_index=False)['Valor_num'].sum()
+        resumen = resumen.rename(columns={'Valor_num':'Suma_total_num'})
         resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
-        resumen_display = resumen[['Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Suma total', 'Suma_total_num']].copy()
-
-        # ordenar antes de mostrar
+        resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
         res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
         st.subheader("Resumen (suma por Cuit/Cuil)")
-        st.dataframe(res_sorted[['Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Suma total']])
+        st.dataframe(res_sorted[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
 
-        # Guardar resultados en session_state para persistir entre reruns
         st.session_state['df_detalle_display'] = df_detalle_display
         st.session_state['res_sorted'] = res_sorted
 
@@ -235,9 +195,8 @@ if file_personas and file_banco and run_button:
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
 
-# Botón para resetear resultados guardados
 if st.button("Resetear resultados"):
-    for k in ['df_detalle_display', 'res_sorted']:
+    for k in ['df_detalle_display','res_sorted']:
         if k in st.session_state:
             del st.session_state[k]
     st.experimental_rerun()
@@ -249,12 +208,10 @@ if 'df_detalle_display' in st.session_state and 'res_sorted' in st.session_state
     search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value="", key="search_lote")
     if search_lote:
         search_lower = str(search_lote).strip().lower()
-        # Filas del detalle que coinciden
         mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
         matches_det = df_detalle_display[mask_det]
         count_det = len(matches_det)
 
-        # Filas del resumen que coinciden (usar res_sorted)
         mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
         matches_res = res_sorted[mask_res]
         count_res = len(matches_res)
@@ -262,7 +219,6 @@ if 'df_detalle_display' in st.session_state and 'res_sorted' in st.session_state
         st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
 
         if count_det > 0:
-            # Resaltar filas en detalle usando Styler
             def highlight_det(row):
                 return ['background-color: yellow' if search_lower in str(row['Lote']).lower() else '' for _ in row.index]
 
@@ -273,7 +229,7 @@ if 'df_detalle_display' in st.session_state and 'res_sorted' in st.session_state
             st.info("No se encontraron filas en el detalle para ese lote.")
 
         if count_res > 0:
-            matches_res_display = matches_res[['Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Suma total']].copy()
+            matches_res_display = matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].copy()
 
             def highlight_res(row):
                 return ['background-color: yellow' if search_lower in str(row['Lote']).lower() else '' for _ in row.index]
@@ -289,4 +245,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.3
+# Versión: 4.4

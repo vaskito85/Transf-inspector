@@ -1,6 +1,5 @@
 streamlit>=1.20
-pandas>=1.5
+pandas>=2.0.1
 numpy>=1.23
 openpyxl>=3.0
-xlrd==1.2.0
-pyahocorasick>=1.4  # opcional, mejora búsquedas múltiples en datasets grandes
+pyahocorasick>=1.4  # opcional
