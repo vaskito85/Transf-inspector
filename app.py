@@ -1,3 +1,4 @@
+# streamlit_app.py
 import streamlit as st
 import pandas as pd
 import re
@@ -6,9 +7,9 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4"
+VERSION = "4.1"
 
-# Utilidades
+# ---------- utilidades ----------
 def find_col(df, keywords):
     for k in keywords:
         for c in df.columns:
@@ -23,7 +24,35 @@ def only_digits(s):
 def read_excel_bytes(uploaded_file):
     return pd.read_excel(uploaded_file, dtype=str, engine="openpyxl").fillna('')
 
-# Upload
+def format_currency_ar(value):
+    """Formatea número al estilo argentino: miles con punto y decimales con coma (2 decimales)."""
+    try:
+        v = float(value)
+    except Exception:
+        return value if value is not None else ''
+    sign = '-' if v < 0 else ''
+    v_abs = abs(v)
+    s = f"{v_abs:,.2f}"            # 1,234,567.89
+    s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
+    return sign + s
+
+def format_date_iso(d):
+    """Formatea fecha a YYYY-MM-DD (con ceros a la izquierda)."""
+    if pd.isna(d):
+        return ''
+    try:
+        return f"{d.year}-{d.month:02d}-{d.day:02d}"
+    except Exception:
+        # si no es datetime, intentar parsear
+        try:
+            dt = pd.to_datetime(d, errors='coerce')
+            if pd.isna(dt):
+                return str(d)
+            return f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
+        except Exception:
+            return str(d)
+
+# ---------- UI: subida ----------
 col1, col2 = st.columns(2)
 with col1:
     file_personas = st.file_uploader("Sube Excel con Cuit/Cuil, Nombre, Lote, Golf", type=["xlsx"], key="personas")
@@ -32,6 +61,7 @@ with col2:
 
 run_button = st.button("Procesar archivos")
 
+# ---------- procesamiento ----------
 if file_personas and file_banco and run_button:
     try:
         personas = read_excel_bytes(file_personas)
@@ -40,7 +70,7 @@ if file_personas and file_banco and run_button:
         st.error(f"Error leyendo archivos: {e}")
         st.stop()
 
-    # detectar columnas
+    # detectar columnas en banco
     concepto_col = find_col(banco, ['concepto', 'concept'])
     credito_col = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
     fecha_col = find_col(banco, ['fecha', 'date', 'fecha de'])
@@ -48,6 +78,7 @@ if file_personas and file_banco and run_button:
         st.error("No se encontró la columna 'Concepto' en el archivo bancario.")
         st.stop()
 
+    # detectar columnas en personas
     cuit_col = find_col(personas, ['cuit', 'cuil'])
     nombre_col = find_col(personas, ['nombre', 'name'])
     lote_col = find_col(personas, ['lote'])
@@ -76,7 +107,6 @@ if file_personas and file_banco and run_button:
         nombre = p.get(nombre_col, '') if nombre_col else ''
         lote = p.get(lote_col, '') if lote_col else ''
         golf = p.get(golf_col, '') if golf_col else ''
-        etiqueta = lote if str(lote).strip() else golf if str(golf).strip() else ''
 
         # buscar por texto y por dígitos
         mask_text = banco['Concepto_str'].str.contains(cuit_raw, case=False, na=False, regex=False)
@@ -86,7 +116,7 @@ if file_personas and file_banco and run_button:
 
         for _, m in matches.iterrows():
             credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
-            # normalizar número (intentar)
+            # normalizar número (usar punto decimal interno)
             credito_num = pd.to_numeric(str(credito_val).replace('.','').replace(',','.'), errors='coerce')
             fecha_val = m.get(fecha_col, '') if fecha_col else ''
             fecha_dt = pd.to_datetime(fecha_val, errors='coerce')
@@ -97,8 +127,8 @@ if file_personas and file_banco and run_button:
                 'Nombre': nombre,
                 'Lote': lote,
                 'Golf': golf,
-                'Valor transferido': credito_val,
                 'Valor_num': credito_num,
+                'Valor_raw': credito_val,
                 'Concepto encontrado': m.get(concepto_col, '')
             })
 
@@ -110,24 +140,79 @@ if file_personas and file_banco and run_button:
     if df_detalle.empty:
         st.info("No se encontraron coincidencias.")
     else:
-        # ordenar y mostrar detalle (Fecha primero)
+        # ordenar y preparar columnas de visualización
         df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], errors='coerce')
         df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
-        display_detalle = df_detalle[['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']].copy()
-        st.subheader("Detalle de coincidencias")
-        st.dataframe(display_detalle)
 
-        # resumen simple: suma por Cuit/Cuil, Nombre, Lote/Golf
+        # columna Fecha en formato YYYY-MM-DD
+        df_detalle['Fecha_str'] = df_detalle['Fecha'].apply(format_date_iso)
+
+        # columna Valor formateada (estilo argentino)
+        df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else (str(x) if x is not None else ''))
+
+        # Tabla detalle: Fecha primero
+        df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote','Golf','Valor_formateado','Concepto encontrado']].copy()
+        df_detalle_display = df_detalle_display.rename(columns={
+            'Fecha_str': 'Fecha',
+            'Valor_formateado': 'Valor transferido'
+        })
+
+        st.subheader("Detalle de coincidencias")
+        st.dataframe(df_detalle_display)
+
+        # Resumen simple: suma por Cuit/Cuil, Nombre, Lote, Golf
         df_resumen = df_detalle.copy()
         df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
         resumen = df_resumen.groupby(['Cuit/Cuil','Nombre','Lote','Golf'], as_index=False)['Valor_num'].sum()
-        resumen = resumen.rename(columns={'Valor_num':'Suma total'})
+        resumen = resumen.rename(columns={'Valor_num':'Suma_total_num'})
+        resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
+        resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
+
         st.subheader("Resumen (suma por Cuit/Cuil)")
-        st.dataframe(resumen.sort_values('Suma total', ascending=False))
+        st.dataframe(resumen_display[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].sort_values('Suma_total_num', ascending=False))
+
+        # ---------- Buscador por Lote ----------
+        st.markdown("---")
+        st.subheader("Buscar por Lote (resalta coincidencias)")
+        search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value="", key="search_lote")
+        if search_lote:
+            search_lower = str(search_lote).strip().lower()
+            # Filas del detalle que coinciden
+            mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+            matches_det = df_detalle_display[mask_det]
+            count_det = len(matches_det)
+
+            # Filas del resumen que coinciden
+            mask_res = resumen_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+            matches_res = resumen_display[mask_res]
+            count_res = len(matches_res)
+
+            st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
+
+            if count_det > 0:
+                # Resaltar filas en detalle usando Styler
+                def highlight_lote(row):
+                    return ['background-color: yellow' if (str(row['Lote']).lower().find(search_lower) != -1) else '' for _ in row.index]
+
+                styled_det = matches_det.style.apply(lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index], axis=1)
+                st.markdown("**Detalle (filtrado por lote)**")
+                st.dataframe(styled_det)  # Streamlit acepta Styler en st.dataframe
+
+            else:
+                st.info("No se encontraron filas en el detalle para ese lote.")
+
+            if count_res > 0:
+                # Resaltar filas en resumen usando Styler
+                matches_res_display = matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].copy()
+                styled_res = matches_res_display.style.apply(lambda r: ['background-color: yellow' if str(r['Lote']).lower().find(search_lower) != -1 else '' for _ in r.index], axis=1)
+                st.markdown("**Resumen (filtrado por lote)**")
+                st.dataframe(styled_res)
+            else:
+                st.info("No se encontraron filas en el resumen para ese lote.")
 
     st.success("Procesamiento finalizado.")
 
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4
+# Versión: 4.1
