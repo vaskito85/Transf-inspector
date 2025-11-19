@@ -8,7 +8,7 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.11"
+VERSION = "4.12"
 
 # ---------- inicializar session_state ----------
 # Si se pidió reset en la ejecución anterior, limpiar ahora (antes de crear widgets)
@@ -263,6 +263,23 @@ with st.form("procesar_form"):
 
             st.success("Procesamiento finalizado.")
 
+# ---------- Mostrar resultados guardados siempre si existen ----------
+if st.session_state.get('df_detalle_display') is not None:
+    st.markdown("---")
+    st.subheader("Detalle guardado (persistente)")
+    try:
+        st.dataframe(st.session_state['df_detalle_display'])
+    except Exception:
+        st.write("Detalle guardado (no se puede renderizar con st.dataframe)")
+
+if st.session_state.get('res_sorted') is not None:
+    st.markdown("---")
+    st.subheader("Resumen guardado (persistente)")
+    try:
+        st.dataframe(st.session_state['res_sorted'][['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
+    except Exception:
+        st.write("Resumen guardado (no se puede renderizar con st.dataframe)")
+
 # ---------- Buscador por Lote persistente ----------
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
@@ -323,4 +340,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.11
+# Versión: 4.12
