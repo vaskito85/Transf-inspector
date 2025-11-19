@@ -8,7 +8,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.6.1"
+VERSION = "5.6.2"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -308,12 +308,18 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     if 'Golf_num' in resumen_display.columns:
         resumen_display['Golf_num'] = try_cast_int_series_safe(resumen_display['Golf_num'])
 
-    # Para la vista: preferir la columna numérica (sin .0 si fue casteada a Int64),
-    # y si no existe, dejar la versión textual original.
+    # ---------- prefer_num_or_raw seguro (evita coerción int('') al mezclar tipos) ----------
     def prefer_num_or_raw(df, col_raw, col_num):
+        """
+        Devuelve df donde la columna col_raw se reemplaza por col_num cuando col_num no es NA.
+        Esta versión evita errores de coerción forzando ambas columnas a object antes del where.
+        """
         df = df.copy()
         if col_num in df.columns:
-            df[col_raw] = df[col_num].where(df[col_num].notna(), df[col_raw])
+            # forzar ambas columnas a object para evitar coerción a dtype numérico
+            col_num_obj = df[col_num].astype(object)
+            col_raw_obj = df[col_raw].astype(object) if col_raw in df.columns else pd.Series([''] * len(df), index=df.index, dtype=object)
+            df[col_raw] = col_num_obj.where(col_num_obj.notna(), col_raw_obj)
         return df
 
     df_detalle_display = prefer_num_or_raw(df_detalle_display, 'Lote', 'Lote_num')
