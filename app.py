@@ -8,20 +8,11 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.8"
+VERSION = "4.9"
 
 # ---------- inicializar session_state ----------
-# Si se solicita reset (do_reset) limpiamos al inicio antes de crear widgets
-if 'do_reset' in st.session_state and st.session_state.get('do_reset'):
-    for k in ['uploaded_personas_bytes','uploaded_banco_bytes','uploaded_personas_name','uploaded_banco_name',
-              'df_detalle_display','res_sorted','processed','search_lote']:
-        if k in st.session_state:
-            del st.session_state[k]
-    # quitar la bandera y forzar rerun para continuar con estado limpio
+if 'do_reset' not in st.session_state:
     st.session_state['do_reset'] = False
-    st.experimental_rerun()
-
-# Inicializaciones seguras (si no existen)
 if 'uploaded_personas_bytes' not in st.session_state:
     st.session_state['uploaded_personas_bytes'] = None
 if 'uploaded_banco_bytes' not in st.session_state:
@@ -38,6 +29,15 @@ if 'processed' not in st.session_state:
     st.session_state['processed'] = False
 if 'search_lote' not in st.session_state:
     st.session_state['search_lote'] = ''
+
+# Si se pidió reset en la ejecución anterior, limpiar ahora (antes de crear widgets)
+if st.session_state.get('do_reset', False):
+    for k in ['uploaded_personas_bytes','uploaded_banco_bytes','uploaded_personas_name','uploaded_banco_name',
+              'df_detalle_display','res_sorted','processed','search_lote']:
+        if k in st.session_state:
+            del st.session_state[k]
+    st.session_state['do_reset'] = False
+    # No forzamos rerun con experimental_rerun para compatibilidad; el estado ya quedó limpio.
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -80,7 +80,7 @@ def format_date_iso(d):
         return f"{d.year}-{d.month:02d}-{d.day:02d}"
     except Exception:
         try:
-            dt = pd.to_datetime(d, errors='coerce')
+            dt = pd.to_datetime(d, dayfirst=True, errors='coerce')
             if pd.isna(dt):
                 return str(d)
             return f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
@@ -155,6 +155,7 @@ with st.form("procesar_form"):
                 st.error("No se encontró la columna 'Cuit/Cuil' en el archivo de personas.")
                 st.stop()
 
+            # preparar datos
             personas['cuit_raw'] = personas[cuit_col].astype(str).str.strip()
             personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
             banco['Concepto_str'] = banco[concepto_col].astype(str)
@@ -188,8 +189,9 @@ with st.form("procesar_form"):
                     else:
                         credito_norm = credito_str.replace(',', '')
                     credito_num = pd.to_numeric(credito_norm, errors='coerce')
+                    # parsear fecha con dayfirst=True para evitar warnings y ambigüedades
                     fecha_val = m.get(fecha_col, '') if fecha_col else ''
-                    fecha_dt = pd.to_datetime(fecha_val, errors='coerce')
+                    fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
 
                     resultados.append({
                         'Fecha': fecha_dt,
@@ -212,7 +214,7 @@ with st.form("procesar_form"):
                 st.session_state['df_detalle_display'] = None
                 st.session_state['res_sorted'] = None
             else:
-                df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], errors='coerce')
+                df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], dayfirst=True, errors='coerce')
                 df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
                 df_detalle['Fecha_str'] = df_detalle['Fecha'].apply(format_date_iso)
                 df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
@@ -244,10 +246,10 @@ with st.form("procesar_form"):
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
 
-# Botón Reset: activa la bandera do_reset y fuerza rerun.
+# Botón Reset: activa la bandera do_reset (la limpieza se hace al inicio de la siguiente ejecución)
 if st.button("Resetear resultados"):
     st.session_state['do_reset'] = True
-    st.experimental_rerun()
+    st.success("Se solicitó reset. La página se recargará automáticamente o recargala manualmente para ver el estado limpio.")
 
 if st.session_state.get('processed', False) and st.session_state['df_detalle_display'] is not None and st.session_state['res_sorted'] is not None:
     df_detalle_display = st.session_state['df_detalle_display']
@@ -261,6 +263,7 @@ if st.session_state.get('processed', False) and st.session_state['df_detalle_dis
     )
 
     if search_lote:
+        # El widget con key="search_lote" actualiza st.session_state automáticamente; no reasignar aquí.
         search_lower = str(search_lote).strip().lower()
         mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
         matches_det = df_detalle_display[mask_det]
@@ -299,4 +302,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.8
+# Versión: 4.9
