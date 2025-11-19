@@ -7,7 +7,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.3"
+VERSION = "5.4"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -64,6 +64,23 @@ def format_currency_ar(value):
     s = f"{v_abs:,.2f}"
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
+
+def try_cast_int_series(s: pd.Series) -> pd.Series:
+    """Si todos los valores no nulos son enteros, devuelve la serie como Int64; si no, devuelve la serie original."""
+    try:
+        non_null = s.dropna()
+        if non_null.empty:
+            return s
+        # comprobar si todos son numéricos y enteros
+        numeric = pd.to_numeric(non_null, errors='coerce')
+        if numeric.isna().any():
+            return s
+        if (numeric % 1 == 0).all():
+            # convertir toda la serie a Int64 (mantiene NA)
+            return pd.to_numeric(s, errors='coerce').astype('Int64')
+        return s
+    except Exception:
+        return s
 
 @st.cache_data
 def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
@@ -203,9 +220,39 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     resumen_display = resumen[['Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Suma total','Suma_total_num','Lote_num','Golf_num']].copy()
     resumen_display = resumen_display.rename(columns={'Lote_raw':'Lote','Golf_raw':'Golf'})
 
+    # ---------- Ajuste final: convertir columnas numéricas a Int64 cuando sea posible
+    if 'Lote_num' in df_detalle_display.columns:
+        df_detalle_display['Lote_num'] = try_cast_int_series(df_detalle_display['Lote_num'])
+    if 'Golf_num' in df_detalle_display.columns:
+        df_detalle_display['Golf_num'] = try_cast_int_series(df_detalle_display['Golf_num'])
+
+    if 'Lote_num' in resumen_display.columns:
+        resumen_display['Lote_num'] = try_cast_int_series(resumen_display['Lote_num'])
+    if 'Golf_num' in resumen_display.columns:
+        resumen_display['Golf_num'] = try_cast_int_series(resumen_display['Golf_num'])
+
+    # Para la vista: preferir la columna numérica (sin .0 si fue casteada a Int64),
+    # y si no existe, dejar la versión textual original.
+    def prefer_num_or_raw(df, col_raw, col_num):
+        df = df.copy()
+        if col_num in df.columns:
+            df[col_raw] = df[col_num].where(df[col_num].notna(), df[col_raw])
+        return df
+
+    df_detalle_display = prefer_num_or_raw(df_detalle_display, 'Lote', 'Lote_num')
+    df_detalle_display = prefer_num_or_raw(df_detalle_display, 'Golf', 'Golf_num')
+
+    resumen_display = prefer_num_or_raw(resumen_display, 'Lote', 'Lote_num')
+    resumen_display = prefer_num_or_raw(resumen_display, 'Golf', 'Golf_num')
+
+    # Ordenar resumen por suma
     res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
-    return df_detalle_display, res_sorted
+    # Antes de devolver: normalizar nombres y devolver copias limpias
+    df_detalle_display_to_save = df_detalle_display.copy()
+    res_sorted_to_save = res_sorted.copy()
+
+    return df_detalle_display_to_save, res_sorted_to_save
 
 # ---------- UI: subida ----------
 col1, col2 = st.columns(2)
@@ -282,32 +329,36 @@ def show_aggrid(df, height=400, page_size=25):
 if st.session_state.get('df_detalle_display') is not None:
     st.markdown("---")
     st.subheader("Detalle guardado")
-    # Preparar copia para mostrar: usar Lote_num/Golf_num para ordenamiento si existen,
-    # pero mantener la columna Lote (texto) en session_state para búsquedas.
     df_det_show = st.session_state['df_detalle_display'].copy()
-    # Si existen columnas numéricas, reemplazamos la columna visible 'Lote' por su versión numérica
-    # para que AgGrid ordene numéricamente, pero dejamos la columna 'Lote' original en session_state.
-    if 'Lote_num' in df_det_show.columns:
-        df_det_show['Lote_display'] = df_det_show['Lote'].where(df_det_show['Lote'].isna(), df_det_show['Lote'])
-        df_det_show['Lote'] = df_det_show['Lote_num'].where(df_det_show['Lote_num'].notna(), df_det_show['Lote'])
-    if 'Golf_num' in df_det_show.columns:
-        df_det_show['Golf'] = df_det_show['Golf_num'].where(df_det_show['Golf_num'].notna(), df_det_show['Golf'])
-    # Mostrar (la columna Lote ahora contiene valores numéricos cuando fue posible)
-    show_aggrid(df_det_show[['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']], height=400, page_size=page_size)
-    csv_det = df_det_show[['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']].to_csv(index=False).encode('utf-8')
+    # Si existen columnas numéricas (Int64) ya no mostrarán .0; si no, quedan como strings
+    # Mostrar columnas en orden deseado
+    cols_det = ['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
+    # Asegurar que existan las columnas solicitadas
+    cols_det = [c for c in cols_det if c in df_det_show.columns]
+    show_aggrid(df_det_show[cols_det], height=400, page_size=page_size)
+    # Para descarga: convertir Int64 a string sin .0 y mantener texto tal cual
+    df_det_export = df_det_show[cols_det].copy()
+    for c in ['Lote','Golf']:
+        if c in df_det_export.columns:
+            # Int64 -> str yields '186' not '186.0'; floats will be converted removing .0 when integer
+            df_det_export[c] = df_det_export[c].apply(lambda v: '' if pd.isna(v) else (str(int(v)) if (isinstance(v, (int,)) or (isinstance(v, float) and float(v).is_integer())) else str(v)))
+    csv_det = df_det_export.to_csv(index=False).encode('utf-8')
     st.download_button("Descargar detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv")
 
 if st.session_state.get('res_sorted') is not None:
     st.markdown("---")
     st.subheader("Resumen guardado")
     res_sorted_df = st.session_state['res_sorted'].copy()
-    # usar columnas numéricas para ordenamiento si existen
-    if 'Lote_num' in res_sorted_df.columns:
-        res_sorted_df['Lote'] = res_sorted_df['Lote_num'].where(res_sorted_df['Lote_num'].notna(), res_sorted_df['Lote'])
-    if 'Golf_num' in res_sorted_df.columns:
-        res_sorted_df['Golf'] = res_sorted_df['Golf_num'].where(res_sorted_df['Golf_num'].notna(), res_sorted_df['Golf'])
-    show_aggrid(res_sorted_df[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']], height=300, page_size=page_size)
-    csv_res = res_sorted_df[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].to_csv(index=False).encode('utf-8')
+    cols_res = ['Cuit/Cuil','Nombre','Lote','Golf','Suma total']
+    cols_res = [c for c in cols_res if c in res_sorted_df.columns]
+    # Mostrar en grilla
+    show_aggrid(res_sorted_df[cols_res], height=300, page_size=page_size)
+    # Preparar export sin .0
+    df_res_export = res_sorted_df[cols_res + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])].copy()
+    for c in ['Lote','Golf']:
+        if c in df_res_export.columns:
+            df_res_export[c] = df_res_export[c].apply(lambda v: '' if pd.isna(v) else (str(int(v)) if (isinstance(v, (int,)) or (isinstance(v, float) and float(v).is_integer())) else str(v)))
+    csv_res = df_res_export.to_csv(index=False).encode('utf-8')
     st.download_button("Descargar resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv")
 
 # ---------- Buscador por Lote persistente (filtrado seguro sin SettingWithCopyWarning) ----------
@@ -319,7 +370,7 @@ search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", val
 if search_lote and st.session_state.get('df_detalle_display') is not None:
     search_lower = str(search_lote).strip().lower()
     df_det = st.session_state['df_detalle_display']
-    # filtrar usando la columna textual 'Lote' (raw) que guardamos en session_state
+    # filtrar usando la columna textual 'Lote' (raw or replaced) que guardamos en session_state
     mask_det = df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
     matches_det = df_det.loc[mask_det].copy()   # .loc + .copy() evita SettingWithCopyWarning
     count_det = len(matches_det)
@@ -332,23 +383,18 @@ if search_lote and st.session_state.get('df_detalle_display') is not None:
     st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
 
     if count_det > 0:
-        # preparar vista para mostrar: usar columnas numéricas si existen para ordenar
-        if 'Lote_num' in matches_det.columns:
-            matches_det['Lote'] = matches_det['Lote_num'].where(matches_det['Lote_num'].notna(), matches_det['Lote'])
-        if 'Golf_num' in matches_det.columns:
-            matches_det['Golf'] = matches_det['Golf_num'].where(matches_det['Golf_num'].notna(), matches_det['Golf'])
-        show_aggrid(matches_det[['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']], height=300, page_size=page_size)
+        # preparar vista para mostrar: columnas disponibles
+        cols_det = ['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
+        cols_det = [c for c in cols_det if c in matches_det.columns]
+        show_aggrid(matches_det[cols_det], height=300, page_size=page_size)
     else:
         st.info("No se encontraron filas en el detalle para ese lote.")
 
     if count_res > 0:
-        if 'Lote_num' in matches_res.columns:
-            matches_res['Lote'] = matches_res['Lote_num'].where(matches_res['Lote_num'].notna(), matches_res['Lote'])
-        if 'Golf_num' in matches_res.columns:
-            matches_res['Golf'] = matches_res['Golf_num'].where(matches_res['Golf_num'].notna(), matches_res['Golf'])
-        show_aggrid(matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']], height=250, page_size=page_size)
+        cols_res = ['Cuit/Cuil','Nombre','Lote','Golf','Suma total']
+        cols_res = [c for c in cols_res if c in matches_res.columns]
+        show_aggrid(matches_res[cols_res], height=250, page_size=page_size)
     else:
         st.info("No se encontraron filas en el resumen para ese lote.")
 
-# Mantener el final igual que en la v5.2
 st.caption(f"Versión de la app: {VERSION}")
