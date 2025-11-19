@@ -3,4 +3,5 @@ pandas
 numpy
 openpyxl
 xlrd
-pyahocorasick>=1.4  # opcional
+streamlit-aggrid
+pyahocorasick

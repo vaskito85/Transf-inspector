@@ -3,26 +3,14 @@ import io
 import re
 import pandas as pd
 import streamlit as st
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
-# Versión de la app
-VERSION = "4.13"
+VERSION = "5.0"
 
 # ---------- inicializar session_state ----------
-# Si se pidió reset en la ejecución anterior, limpiar ahora (antes de crear widgets)
-if 'do_reset' in st.session_state and st.session_state.get('do_reset'):
-    for k in ['uploaded_personas_bytes','uploaded_banco_bytes','uploaded_personas_name','uploaded_banco_name',
-              'df_detalle_display','res_sorted','processed','search_lote','do_reset']:
-        if k in st.session_state:
-            del st.session_state[k]
-    # Terminamos esta ejecución; la siguiente ejecución arrancará con estado limpio
-    st.stop()
-
-# Inicializaciones seguras (si no existen)
-if 'do_reset' not in st.session_state:
-    st.session_state['do_reset'] = False
 if 'uploaded_personas_bytes' not in st.session_state:
     st.session_state['uploaded_personas_bytes'] = None
 if 'uploaded_banco_bytes' not in st.session_state:
@@ -52,8 +40,8 @@ def only_digits(s):
     return re.sub(r'\D', '', str(s))
 
 @st.cache_data
-def read_excel_bytes_from_buffer(buf, ext_hint=None):
-    """Lee bytes de Excel y devuelve DataFrame con dtype=str."""
+def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
+    buf = io.BytesIO(buf_bytes)
     try:
         if ext_hint and ext_hint.lower() == "xls":
             return pd.read_excel(buf, dtype=str).fillna('')
@@ -62,6 +50,114 @@ def read_excel_bytes_from_buffer(buf, ext_hint=None):
     except Exception:
         buf.seek(0)
         return pd.read_excel(buf, dtype=str).fillna('')
+
+@st.cache_data
+def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
+    """Procesa los bytes y devuelve (df_detalle_display, res_sorted). Cacheado."""
+    personas = read_excel_bytes_from_buffer(personas_bytes, ext_hint=(personas_name.split('.')[-1] if personas_name else None))
+    banco = read_excel_bytes_from_buffer(banco_bytes, ext_hint=(banco_name.split('.')[-1] if banco_name else None))
+
+    # detectar columnas
+    concepto_col = find_col(banco, ['concepto', 'concept'])
+    credito_col = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
+    fecha_col = find_col(banco, ['fecha', 'date', 'fecha de'])
+    if not concepto_col:
+        raise ValueError("No se encontró la columna 'Concepto' en el archivo bancario.")
+    cuit_col = find_col(personas, ['cuit', 'cuil'])
+    nombre_col = find_col(personas, ['nombre', 'name'])
+    lote_col = find_col(personas, ['lote'])
+    golf_col = find_col(personas, ['golf'])
+    if not cuit_col:
+        raise ValueError("No se encontró la columna 'Cuit/Cuil' en el archivo de personas.")
+
+    # preparar columnas
+    personas['cuit_raw'] = personas[cuit_col].astype(str).str.strip()
+    personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
+    banco['Concepto_str'] = banco[concepto_col].astype(str)
+    banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
+
+    # Vectorizado: construir pattern con CUITs (dígitos)
+    cuit_list = personas['cuit_digits'].dropna().unique().tolist()
+    # si la lista está vacía, no hay coincidencias
+    if len(cuit_list) == 0:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # Escapar y unir; para datasets medianos esto funciona bien
+    escaped = [re.escape(x) for x in cuit_list if x != '']
+    pattern = '|'.join(escaped)
+    # buscar en la columna de dígitos (más robusto)
+    mask_any = banco['Concepto_digits'].str.contains(pattern, na=False, regex=True)
+    matches = banco[mask_any].copy()
+
+    resultados = []
+    for _, m in matches.iterrows():
+        concepto = str(m.get(concepto_col, ''))
+        concepto_digits = re.sub(r'\D', '', concepto)
+        # buscar qué CUIT(s) aparecen en este concepto (puede haber más de uno)
+        found = set()
+        for c in escaped:
+            if re.search(c, concepto_digits):
+                found.add(re.sub(r'\\', '', c))  # quitar escapes
+        # si no encontramos por dígitos, intentar buscar por texto bruto (cuit_raw)
+        if not found:
+            for c_raw in personas['cuit_raw'].dropna().unique():
+                if c_raw and c_raw.lower() in concepto.lower():
+                    found.add(only_digits(c_raw))
+        for f in found:
+            # obtener persona asociada (primer match)
+            p = personas[personas['cuit_digits'] == f]
+            if p.empty:
+                nombre = ''
+                lote = ''
+                golf = ''
+            else:
+                rowp = p.iloc[0]
+                nombre = rowp.get(nombre_col, '') if nombre_col else ''
+                lote = rowp.get(lote_col, '') if lote_col else ''
+                golf = rowp.get(golf_col, '') if golf_col else ''
+            credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
+            credito_str = str(credito_val).strip()
+            credito_str = re.sub(r'[^\d,.\-]', '', credito_str)
+            if credito_str.count(',') == 1 and credito_str.count('.') == 0:
+                credito_norm = credito_str.replace('.', '').replace(',', '.')
+            else:
+                credito_norm = credito_str.replace(',', '')
+            credito_num = pd.to_numeric(credito_norm, errors='coerce')
+            fecha_val = m.get(fecha_col, '') if fecha_col else ''
+            fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
+
+            resultados.append({
+                'Fecha': fecha_dt,
+                'Cuit/Cuil': p.iloc[0]['cuit_raw'] if not p.empty else f,
+                'Nombre': nombre,
+                'Lote': lote,
+                'Golf': golf,
+                'Valor_num': credito_num,
+                'Valor_raw': credito_val,
+                'Concepto encontrado': concepto
+            })
+
+    df_detalle = pd.DataFrame(resultados)
+    if df_detalle.empty:
+        return pd.DataFrame(), pd.DataFrame()
+
+    df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], dayfirst=True, errors='coerce')
+    df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
+    df_detalle['Fecha_str'] = df_detalle['Fecha'].dt.strftime('%Y-%m-%d').fillna('')
+    df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
+
+    df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote','Golf','Valor_formateado','Concepto encontrado']].copy()
+    df_detalle_display = df_detalle_display.rename(columns={'Fecha_str': 'Fecha','Valor_formateado': 'Valor transferido'})
+
+    df_resumen = df_detalle.copy()
+    df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
+    resumen = df_resumen.groupby(['Cuit/Cuil','Nombre','Lote','Golf'], as_index=False)['Valor_num'].sum()
+    resumen = resumen.rename(columns={'Valor_num':'Suma_total_num'})
+    resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
+    resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
+    res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
+
+    return df_detalle_display, res_sorted
 
 def format_currency_ar(value):
     try:
@@ -74,245 +170,112 @@ def format_currency_ar(value):
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
-def format_date_iso(d):
-    if pd.isna(d):
-        return ''
-    try:
-        return f"{d.year}-{d.month:02d}-{d.day:02d}"
-    except Exception:
-        try:
-            dt = pd.to_datetime(d, dayfirst=True, errors='coerce')
-            if pd.isna(dt):
-                return str(d)
-            return f"{dt.year}-{dt.month:02d}-{dt.day:02d}"
-        except Exception:
-            return str(d)
-
-# ---------- UI: subida (usamos form para procesar) ----------
-st.markdown("### 1) Subir archivos")
+# ---------- UI: subida ----------
 col1, col2 = st.columns(2)
 with col1:
-    uploaded_personas = st.file_uploader(
-        "Sube Excel con Cuit/Cuil, Nombre, Lote, Golf",
-        type=["xls", "xlsx"],
-        key="u_personas"
-    )
+    uploaded_personas = st.file_uploader("Sube Excel con Cuit/Cuil, Nombre, Lote, Golf", type=["xls","xlsx"], key="u_personas")
 with col2:
-    uploaded_banco = st.file_uploader(
-        "Sube Excel de movimientos (Concepto, Fecha, Crédito)",
-        type=["xls", "xlsx"],
-        key="u_banco"
-    )
+    uploaded_banco = st.file_uploader("Sube Excel de movimientos (Concepto, Fecha, Crédito)", type=["xls","xlsx"], key="u_banco")
 
-# Guardar bytes en session_state para persistencia entre reruns (si se subieron ahora)
+# guardar bytes en session_state
 if uploaded_personas is not None:
-    try:
-        st.session_state['uploaded_personas_bytes'] = uploaded_personas.read()
-        st.session_state['uploaded_personas_name'] = getattr(uploaded_personas, "name", "")
-    except Exception:
-        st.session_state['uploaded_personas_bytes'] = None
-        st.session_state['uploaded_personas_name'] = ""
-
+    st.session_state['uploaded_personas_bytes'] = uploaded_personas.read()
+    st.session_state['uploaded_personas_name'] = getattr(uploaded_personas, "name", "")
 if uploaded_banco is not None:
-    try:
-        st.session_state['uploaded_banco_bytes'] = uploaded_banco.read()
-        st.session_state['uploaded_banco_name'] = getattr(uploaded_banco, "name", "")
-    except Exception:
-        st.session_state['uploaded_banco_bytes'] = None
-        st.session_state['uploaded_banco_name'] = ""
+    st.session_state['uploaded_banco_bytes'] = uploaded_banco.read()
+    st.session_state['uploaded_banco_name'] = getattr(uploaded_banco, "name", "")
 
-st.markdown("### 2) Procesar archivos")
+st.write(" ")
 with st.form("procesar_form"):
-    st.write("Pulsa Procesar archivos para extraer coincidencias entre personas y movimientos.")
+    st.write("Pulsa Procesar archivos para extraer coincidencias.")
     submit = st.form_submit_button("Procesar archivos")
     if submit:
         if not st.session_state.get('uploaded_personas_bytes') or not st.session_state.get('uploaded_banco_bytes'):
             st.error("Subí ambos archivos antes de procesar.")
         else:
             try:
-                buf_p = io.BytesIO(st.session_state['uploaded_personas_bytes'])
-                ext_p = st.session_state.get('uploaded_personas_name','').split('.')[-1] if st.session_state.get('uploaded_personas_name') else None
-                personas = read_excel_bytes_from_buffer(buf_p, ext_hint=ext_p)
-
-                buf_b = io.BytesIO(st.session_state['uploaded_banco_bytes'])
-                ext_b = st.session_state.get('uploaded_banco_name','').split('.')[-1] if st.session_state.get('uploaded_banco_name') else None
-                banco = read_excel_bytes_from_buffer(buf_b, ext_hint=ext_b)
+                df_detalle_display, res_sorted = process_files(
+                    st.session_state['uploaded_personas_bytes'],
+                    st.session_state['uploaded_banco_bytes'],
+                    st.session_state.get('uploaded_personas_name',''),
+                    st.session_state.get('uploaded_banco_name','')
+                )
             except Exception as e:
-                st.error(f"Error leyendo archivos: {e}")
+                st.error(f"Error en procesamiento: {e}")
                 st.stop()
 
-            concepto_col = find_col(banco, ['concepto', 'concept'])
-            credito_col = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
-            fecha_col = find_col(banco, ['fecha', 'date', 'fecha de'])
-            if not concepto_col:
-                st.error("No se encontró la columna 'Concepto' en el archivo bancario.")
-                st.stop()
-
-            cuit_col = find_col(personas, ['cuit', 'cuil'])
-            nombre_col = find_col(personas, ['nombre', 'name'])
-            lote_col = find_col(personas, ['lote'])
-            golf_col = find_col(personas, ['golf'])
-            if not cuit_col:
-                st.error("No se encontró la columna 'Cuit/Cuil' en el archivo de personas.")
-                st.stop()
-
-            # preparar datos
-            personas['cuit_raw'] = personas[cuit_col].astype(str).str.strip()
-            personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
-            banco['Concepto_str'] = banco[concepto_col].astype(str)
-            banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
-
-            resultados = []
-            total_personas = len(personas) if len(personas) > 0 else 1
-            progress = st.progress(0)
-
-            for idx, p in personas.iterrows():
-                cuit_raw = str(p.get('cuit_raw','')).strip()
-                if not cuit_raw:
-                    progress.progress(int((idx+1)/total_personas*100))
-                    continue
-                cuit_digits = only_digits(cuit_raw)
-                nombre = p.get(nombre_col, '') if nombre_col else ''
-                lote = p.get(lote_col, '') if lote_col else ''
-                golf = p.get(golf_col, '') if golf_col else ''
-
-                mask_text = banco['Concepto_str'].str.contains(cuit_raw, case=False, na=False, regex=False)
-                mask_digits = banco['Concepto_digits'].str.contains(cuit_digits, na=False, regex=False) if cuit_digits else False
-                mask = mask_text | mask_digits
-                matches = banco[mask]
-
-                for _, m in matches.iterrows():
-                    credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
-                    credito_str = str(credito_val).strip()
-                    credito_str = re.sub(r'[^\d,.\-]', '', credito_str)
-                    if credito_str.count(',') == 1 and credito_str.count('.') == 0:
-                        credito_norm = credito_str.replace('.', '').replace(',', '.')
-                    else:
-                        credito_norm = credito_str.replace(',', '')
-                    credito_num = pd.to_numeric(credito_norm, errors='coerce')
-                    # parsear fecha con dayfirst=True para evitar warnings y ambigüedades
-                    fecha_val = m.get(fecha_col, '') if fecha_col else ''
-                    fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
-
-                    resultados.append({
-                        'Fecha': fecha_dt,
-                        'Cuit/Cuil': cuit_raw,
-                        'Nombre': nombre,
-                        'Lote': lote,
-                        'Golf': golf,
-                        'Valor_num': credito_num,
-                        'Valor_raw': credito_val,
-                        'Concepto encontrado': m.get(concepto_col, '')
-                    })
-
-                progress.progress(int((idx+1)/total_personas*100))
-            progress.empty()
-
-            df_detalle = pd.DataFrame(resultados)
-            if df_detalle.empty:
+            if df_detalle_display.empty:
                 st.info("No se encontraron coincidencias.")
-                st.session_state['processed'] = False
                 st.session_state['df_detalle_display'] = None
                 st.session_state['res_sorted'] = None
+                st.session_state['processed'] = False
             else:
-                df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], dayfirst=True, errors='coerce')
-                df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
-                df_detalle['Fecha_str'] = df_detalle['Fecha'].apply(format_date_iso)
-                df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
-                df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote','Golf','Valor_formateado','Concepto encontrado']].copy()
-                df_detalle_display = df_detalle_display.rename(columns={'Fecha_str': 'Fecha','Valor_formateado': 'Valor transferido'})
-
-                df_resumen = df_detalle.copy()
-                df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
-                resumen = df_resumen.groupby(['Cuit/Cuil','Nombre','Lote','Golf'], as_index=False)['Valor_num'].sum()
-                resumen = resumen.rename(columns={'Valor_num':'Suma_total_num'})
-                resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
-                resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
-                res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
-
-                # Guardar resultados en session_state para persistir entre reruns
                 st.session_state['df_detalle_display'] = df_detalle_display
                 st.session_state['res_sorted'] = res_sorted
                 st.session_state['processed'] = True
+                st.success("Procesamiento finalizado y resultados guardados.")
 
-            st.success("Procesamiento finalizado. Los resultados se guardaron y se mostrarán como persistentes.")
+# ---------- helpers AgGrid ----------
+def show_aggrid(df, height=400, page_size=25):
+    gb = GridOptionsBuilder.from_dataframe(df)
+    gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+    gb.configure_default_column(filterable=True, sortable=True, resizable=True)
+    gb.configure_grid_options(domLayout='normal')
+    gridOptions = gb.build()
+    AgGrid(
+        df,
+        gridOptions=gridOptions,
+        height=height,
+        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        allow_unsafe_jscode=True,
+    )
 
-# ---------- Mostrar solo las tablas persistentes ----------
-# Evitamos mostrar duplicados: siempre mostramos únicamente las tablas guardadas en session_state.
+# ---------- Mostrar tablas persistentes (Ag-Grid) ----------
 if st.session_state.get('df_detalle_display') is not None:
     st.markdown("---")
     st.subheader("Detalle guardado")
-    try:
-        st.dataframe(st.session_state['df_detalle_display'])
-    except Exception:
-        st.write("Detalle guardado (no se puede renderizar con st.dataframe)")
+    show_aggrid(st.session_state['df_detalle_display'], height=400)
+    # descarga CSV
+    csv_det = st.session_state['df_detalle_display'].to_csv(index=False).encode('utf-8')
+    st.download_button("Descargar detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv")
 
 if st.session_state.get('res_sorted') is not None:
     st.markdown("---")
     st.subheader("Resumen guardado")
-    try:
-        st.dataframe(st.session_state['res_sorted'][['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
-    except Exception:
-        st.write("Resumen guardado (no se puede renderizar con st.dataframe)")
+    show_aggrid(st.session_state['res_sorted'][['Cuit/Cuil','Nombre','Lote','Golf','Suma total']], height=300)
+    csv_res = st.session_state['res_sorted'].to_csv(index=False).encode('utf-8')
+    st.download_button("Descargar resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv")
 
 # ---------- Buscador por Lote persistente ----------
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
 
-# Botón Reset: activa la bandera do_reset (la limpieza se hace al inicio de la siguiente ejecución)
-if st.button("Resetear resultados"):
-    st.session_state['do_reset'] = True
-    st.success("Se solicitó reset. Recargá la página si no se actualiza automáticamente.")
+search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value=st.session_state.get('search_lote',''), key="search_lote")
+# no reasignar st.session_state['search_lote'] manualmente
 
-if st.session_state.get('processed', False) and st.session_state['df_detalle_display'] is not None and st.session_state['res_sorted'] is not None:
-    df_detalle_display = st.session_state['df_detalle_display']
+if search_lote and st.session_state.get('df_detalle_display') is not None:
+    search_lower = str(search_lote).strip().lower()
+    df_det = st.session_state['df_detalle_display']
+    mask_det = df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+    matches_det = df_det[mask_det]
+    count_det = len(matches_det)
+
     res_sorted = st.session_state['res_sorted']
+    mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+    matches_res = res_sorted[mask_res]
+    count_res = len(matches_res)
 
-    # Crear text_input usando el valor guardado en session_state; NO reasignar manualmente después
-    search_lote = st.text_input(
-        "Ingresá número de lote para buscar (ej: 41)",
-        value=st.session_state.get('search_lote', ''),
-        key="search_lote"
-    )
+    st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
 
-    if search_lote:
-        # El widget con key="search_lote" actualiza st.session_state automáticamente; no reasignar aquí.
-        search_lower = str(search_lote).strip().lower()
-        mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
-        matches_det = df_detalle_display[mask_det]
-        count_det = len(matches_det)
+    if count_det > 0:
+        show_aggrid(matches_det, height=300)
+    else:
+        st.info("No se encontraron filas en el detalle para ese lote.")
 
-        mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
-        matches_res = res_sorted[mask_res]
-        count_res = len(matches_res)
+    if count_res > 0:
+        show_aggrid(matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']], height=250)
+    else:
+        st.info("No se encontraron filas en el resumen para ese lote.")
 
-        st.write(f"Coincidencias en detalle: **{count_det}** — Coincidencias en resumen: **{count_res}**")
-
-        if count_det > 0:
-            def highlight_det(row):
-                return ['background-color: yellow' if search_lower in str(row['Lote']).lower() else '' for _ in row.index]
-
-            styled_det = matches_det.style.apply(highlight_det, axis=1)
-            st.markdown("**Detalle (filtrado por lote)**")
-            st.dataframe(styled_det)
-        else:
-            st.info("No se encontraron filas en el detalle para ese lote.")
-
-        if count_res > 0:
-            matches_res_display = matches_res[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']].copy()
-
-            def highlight_res(row):
-                return ['background-color: yellow' if search_lower in str(row['Lote']).lower() else '' for _ in row.index]
-
-            styled_res = matches_res_display.style.apply(highlight_res, axis=1)
-            st.markdown("**Resumen (filtrado por lote)**")
-            st.dataframe(styled_res)
-        else:
-            st.info("No se encontraron filas en el resumen para ese lote.")
-else:
-    st.info("Procesa archivos primero para habilitar la búsqueda por lote.")
-
-# Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
-
-# Versión: 4.13
