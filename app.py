@@ -8,13 +8,28 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.7"
+VERSION = "4.8"
 
 # ---------- inicializar session_state ----------
+# Si se solicita reset (do_reset) limpiamos al inicio antes de crear widgets
+if 'do_reset' in st.session_state and st.session_state.get('do_reset'):
+    for k in ['uploaded_personas_bytes','uploaded_banco_bytes','uploaded_personas_name','uploaded_banco_name',
+              'df_detalle_display','res_sorted','processed','search_lote']:
+        if k in st.session_state:
+            del st.session_state[k]
+    # quitar la bandera y forzar rerun para continuar con estado limpio
+    st.session_state['do_reset'] = False
+    st.experimental_rerun()
+
+# Inicializaciones seguras (si no existen)
 if 'uploaded_personas_bytes' not in st.session_state:
     st.session_state['uploaded_personas_bytes'] = None
 if 'uploaded_banco_bytes' not in st.session_state:
     st.session_state['uploaded_banco_bytes'] = None
+if 'uploaded_personas_name' not in st.session_state:
+    st.session_state['uploaded_personas_name'] = ''
+if 'uploaded_banco_name' not in st.session_state:
+    st.session_state['uploaded_banco_name'] = ''
 if 'df_detalle_display' not in st.session_state:
     st.session_state['df_detalle_display'] = None
 if 'res_sorted' not in st.session_state:
@@ -40,12 +55,10 @@ def read_excel_bytes_from_buffer(buf, ext_hint=None):
     """Lee bytes de Excel y devuelve DataFrame con dtype=str."""
     try:
         if ext_hint and ext_hint.lower() == "xls":
-            # intentar leer .xls con pandas; si falla, dejar que pandas intente
             return pd.read_excel(buf, dtype=str).fillna('')
         else:
             return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
     except Exception:
-        # fallback: intentar sin engine
         buf.seek(0)
         return pd.read_excel(buf, dtype=str).fillna('')
 
@@ -90,7 +103,7 @@ with col2:
         key="u_banco"
     )
 
-# Guardar bytes en session_state para persistencia entre reruns
+# Guardar bytes en session_state para persistencia entre reruns (si se subieron ahora)
 if uploaded_personas is not None:
     try:
         st.session_state['uploaded_personas_bytes'] = uploaded_personas.read()
@@ -112,11 +125,9 @@ with st.form("procesar_form"):
     st.write("Pulsa Procesar archivos para extraer coincidencias entre personas y movimientos.")
     submit = st.form_submit_button("Procesar archivos")
     if submit:
-        # validar que tengamos bytes guardados
         if not st.session_state.get('uploaded_personas_bytes') or not st.session_state.get('uploaded_banco_bytes'):
             st.error("Subí ambos archivos antes de procesar.")
         else:
-            # leer DataFrames desde bytes guardados
             try:
                 buf_p = io.BytesIO(st.session_state['uploaded_personas_bytes'])
                 ext_p = st.session_state.get('uploaded_personas_name','').split('.')[-1] if st.session_state.get('uploaded_personas_name') else None
@@ -129,7 +140,6 @@ with st.form("procesar_form"):
                 st.error(f"Error leyendo archivos: {e}")
                 st.stop()
 
-            # detectar columnas
             concepto_col = find_col(banco, ['concepto', 'concept'])
             credito_col = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
             fecha_col = find_col(banco, ['fecha', 'date', 'fecha de'])
@@ -145,7 +155,6 @@ with st.form("procesar_form"):
                 st.error("No se encontró la columna 'Cuit/Cuil' en el archivo de personas.")
                 st.stop()
 
-            # preparar datos
             personas['cuit_raw'] = personas[cuit_col].astype(str).str.strip()
             personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
             banco['Concepto_str'] = banco[concepto_col].astype(str)
@@ -235,10 +244,9 @@ with st.form("procesar_form"):
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
 
+# Botón Reset: activa la bandera do_reset y fuerza rerun.
 if st.button("Resetear resultados"):
-    for k in ['uploaded_personas_bytes','uploaded_banco_bytes','uploaded_personas_name','uploaded_banco_name','df_detalle_display','res_sorted','processed','search_lote']:
-        if k in st.session_state:
-            del st.session_state[k]
+    st.session_state['do_reset'] = True
     st.experimental_rerun()
 
 if st.session_state.get('processed', False) and st.session_state['df_detalle_display'] is not None and st.session_state['res_sorted'] is not None:
@@ -291,4 +299,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.7
+# Versión: 4.8
