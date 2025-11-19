@@ -8,7 +8,15 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.4"
+VERSION = "4.5"
+
+# ---------- inicializar session_state ----------
+if 'df_detalle_display' not in st.session_state:
+    st.session_state['df_detalle_display'] = None
+if 'res_sorted' not in st.session_state:
+    st.session_state['res_sorted'] = None
+if 'processed' not in st.session_state:
+    st.session_state['processed'] = False
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -34,9 +42,7 @@ def read_excel_bytes(uploaded_file):
             return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
         elif ext == "xls":
             buf.seek(0)
-            # Dejar que pandas intente leer .xls; muchas instalaciones actuales usan engines soportados
             df = pd.read_excel(buf, dtype=str).fillna('')
-            # Reescribimos a buffer xlsx para garantizar comportamiento uniforme
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine="openpyxl") as writer:
                 df.to_excel(writer, index=False)
@@ -164,6 +170,10 @@ if file_personas and file_banco and run_button:
     df_detalle = pd.DataFrame(resultados)
     if df_detalle.empty:
         st.info("No se encontraron coincidencias.")
+        # limpiar session_state processed
+        st.session_state['processed'] = False
+        st.session_state['df_detalle_display'] = None
+        st.session_state['res_sorted'] = None
     else:
         df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], errors='coerce')
         df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
@@ -186,8 +196,10 @@ if file_personas and file_banco and run_button:
         st.subheader("Resumen (suma por Cuit/Cuil)")
         st.dataframe(res_sorted[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
 
+        # Guardar resultados en session_state para persistir entre reruns
         st.session_state['df_detalle_display'] = df_detalle_display
         st.session_state['res_sorted'] = res_sorted
+        st.session_state['processed'] = True
 
     st.success("Procesamiento finalizado.")
 
@@ -196,16 +208,20 @@ st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
 
 if st.button("Resetear resultados"):
-    for k in ['df_detalle_display','res_sorted']:
+    for k in ['df_detalle_display','res_sorted','processed','search_lote']:
         if k in st.session_state:
             del st.session_state[k]
     st.experimental_rerun()
 
-if 'df_detalle_display' in st.session_state and 'res_sorted' in st.session_state:
+if st.session_state.get('processed', False) and st.session_state['df_detalle_display'] is not None and st.session_state['res_sorted'] is not None:
     df_detalle_display = st.session_state['df_detalle_display']
     res_sorted = st.session_state['res_sorted']
 
-    search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value="", key="search_lote")
+    # Usamos un text_input con key; al presionar Enter la app reruneará pero los datos persisten en session_state
+    search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value=st.session_state.get('search_lote',''), key="search_lote")
+    # Guardar el valor en session_state para mantenerlo entre reruns
+    st.session_state['search_lote'] = search_lote
+
     if search_lote:
         search_lower = str(search_lote).strip().lower()
         mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
@@ -245,4 +261,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.4
+# Versión: 4.5
