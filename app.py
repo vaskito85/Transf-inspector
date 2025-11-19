@@ -7,7 +7,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.4"
+VERSION = "5.5"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -80,24 +80,32 @@ def try_cast_int_series(s: pd.Series) -> pd.Series:
     except Exception:
         return s
 
-# Helper seguro para formatear Lote/Golf antes de exportar
+# Helper seguro para formatear Lote/Golf antes de exportar (robusto contra '')
 def format_for_export(v):
+    # NaN o valores vacíos -> cadena vacía
     if pd.isna(v):
         return ''
-    # pandas Int64 (nullable) may be numpy integer-like
+    # Si es pandas nullable Int (Int64) o numpy int
     try:
-        # si es numpy integer or python int
-        if isinstance(v, (int,)) and not isinstance(v, bool):
-            return str(v)
-        # numpy integer types may be numpy.int64 etc.
-        if hasattr(v, 'dtype') and str(v.dtype).startswith('int'):
+        # pandas Int64 scalar
+        if hasattr(v, 'dtype') and str(getattr(v, 'dtype')) == 'Int64':
             try:
                 return str(int(v))
             except Exception:
                 pass
     except Exception:
         pass
-    # floats
+    # Python int
+    if isinstance(v, int) and not isinstance(v, bool):
+        return str(v)
+    # numpy integer-like
+    try:
+        import numpy as np
+        if isinstance(v, (np.integer,)):
+            return str(int(v))
+    except Exception:
+        pass
+    # float
     if isinstance(v, float):
         if float(v).is_integer():
             return str(int(v))
@@ -114,7 +122,7 @@ def format_for_export(v):
                 return str(vv)
     except Exception:
         pass
-    # strings
+    # string
     if isinstance(v, str):
         s = v.strip()
         if s == '':
@@ -388,8 +396,10 @@ if st.session_state.get('df_detalle_display') is not None:
     show_aggrid(df_det_show[cols_det], height=400, page_size=page_size)
     # Para descarga: formatear Lote/Golf de forma segura
     df_det_export = df_det_show[cols_det].copy()
+    # Reemplazar cadenas vacías por NA para evitar int('') en conversiones internas
     for c in ['Lote','Golf']:
         if c in df_det_export.columns:
+            df_det_export[c] = df_det_export[c].replace('', pd.NA)
             df_det_export[c] = df_det_export[c].apply(format_for_export)
     csv_det = df_det_export.to_csv(index=False).encode('utf-8')
     st.download_button("Descargar detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv")
@@ -404,6 +414,7 @@ if st.session_state.get('res_sorted') is not None:
     df_res_export = res_sorted_df[cols_res + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])].copy()
     for c in ['Lote','Golf']:
         if c in df_res_export.columns:
+            df_res_export[c] = df_res_export[c].replace('', pd.NA)
             df_res_export[c] = df_res_export[c].apply(format_for_export)
     csv_res = df_res_export.to_csv(index=False).encode('utf-8')
     st.download_button("Descargar resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv")
