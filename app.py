@@ -7,7 +7,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.5"
+VERSION = "5.6"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -65,80 +65,74 @@ def format_currency_ar(value):
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
-def try_cast_int_series(s: pd.Series) -> pd.Series:
-    """Si todos los valores no nulos son enteros, devuelve la serie como Int64; si no, devuelve la serie original."""
+def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
+    """
+    Intentar convertir a Int64 solo si todos los valores no nulos son enteros.
+    Esta versión es robusta y no lanza int('') porque usa to_numeric(errors='coerce').
+    """
     try:
-        non_null = s.dropna()
+        s2 = s.copy()
+        # convertir a num (coerce convierte '' a NaN)
+        numeric = pd.to_numeric(s2, errors='coerce')
+        non_null = numeric.dropna()
         if non_null.empty:
-            return s
-        numeric = pd.to_numeric(non_null, errors='coerce')
-        if numeric.isna().any():
-            return s
-        if (numeric % 1 == 0).all():
-            return pd.to_numeric(s, errors='coerce').astype('Int64')
-        return s
+            return s2
+        if (non_null % 1 == 0).all():
+            return numeric.astype('Int64')
+        return s2
     except Exception:
         return s
 
-# Helper seguro para formatear Lote/Golf antes de exportar (robusto contra '')
-def format_for_export(v):
-    # NaN o valores vacíos -> cadena vacía
-    if pd.isna(v):
-        return ''
-    # Si es pandas nullable Int (Int64) o numpy int
+def safe_int_like_to_str(v):
+    """
+    Convierte de forma segura a string sin .0 cuando corresponde.
+    Nunca hace int('') ni lanza ValueError por cadena vacía.
+    """
     try:
-        # pandas Int64 scalar
-        if hasattr(v, 'dtype') and str(getattr(v, 'dtype')) == 'Int64':
-            try:
-                return str(int(v))
-            except Exception:
-                pass
-    except Exception:
-        pass
-    # Python int
-    if isinstance(v, int) and not isinstance(v, bool):
-        return str(v)
-    # numpy integer-like
-    try:
-        import numpy as np
-        if isinstance(v, (np.integer,)):
-            return str(int(v))
-    except Exception:
-        pass
-    # float
-    if isinstance(v, float):
-        if float(v).is_integer():
-            return str(int(v))
-        return str(v)
-    # pandas scalar with .item()
-    try:
-        if hasattr(v, 'item'):
-            vv = v.item()
-            if isinstance(vv, int) and not isinstance(vv, bool):
-                return str(vv)
-            if isinstance(vv, float):
-                if float(vv).is_integer():
-                    return str(int(vv))
-                return str(vv)
-    except Exception:
-        pass
-    # string
-    if isinstance(v, str):
-        s = v.strip()
-        if s == '':
+        if pd.isna(v):
             return ''
-        if re.fullmatch(r'[+-]?\d+', s):
+        # pandas nullable Int64
+        try:
+            import numpy as np
+            if isinstance(v, (np.integer,)):
+                return str(int(v))
+        except Exception:
+            pass
+        if isinstance(v, int) and not isinstance(v, bool):
+            return str(v)
+        if isinstance(v, float):
+            if float(v).is_integer():
+                return str(int(v))
+            return str(v)
+        # pandas scalar with .item()
+        try:
+            if hasattr(v, 'item'):
+                vv = v.item()
+                if isinstance(vv, int) and not isinstance(vv, bool):
+                    return str(vv)
+                if isinstance(vv, float):
+                    if float(vv).is_integer():
+                        return str(int(vv))
+                    return str(vv)
+        except Exception:
+            pass
+        if isinstance(v, str):
+            s = v.strip()
+            if s == '':
+                return ''
+            # entero en string
+            if re.fullmatch(r'[+-]?\d+', s):
+                return s
+            # float en string que es entero "186.0"
+            if re.fullmatch(r'[+-]?\d+\.\d+', s):
+                try:
+                    f = float(s)
+                    if f.is_integer():
+                        return str(int(f))
+                except Exception:
+                    pass
             return s
-        if re.fullmatch(r'[+-]?\d+\.\d+', s):
-            try:
-                f = float(s)
-                if f.is_integer():
-                    return str(int(f))
-            except Exception:
-                pass
-        return s
-    # fallback
-    try:
+        # fallback
         return str(v)
     except Exception:
         return ''
@@ -281,22 +275,23 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     resumen_display = resumen[['Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Suma total','Suma_total_num','Lote_num','Golf_num']].copy()
     resumen_display = resumen_display.rename(columns={'Lote_raw':'Lote','Golf_raw':'Golf'})
 
-    # ---------- Ajuste final: convertir columnas numéricas a Int64 cuando sea posible
+    # ---------- Ajuste final: convertir columnas numéricas a Int64 cuando sea posible (seguro)
     if 'Lote_num' in df_detalle_display.columns:
-        df_detalle_display['Lote_num'] = try_cast_int_series(df_detalle_display['Lote_num'])
+        df_detalle_display['Lote_num'] = try_cast_int_series_safe(df_detalle_display['Lote_num'])
     if 'Golf_num' in df_detalle_display.columns:
-        df_detalle_display['Golf_num'] = try_cast_int_series(df_detalle_display['Golf_num'])
+        df_detalle_display['Golf_num'] = try_cast_int_series_safe(df_detalle_display['Golf_num'])
 
     if 'Lote_num' in resumen_display.columns:
-        resumen_display['Lote_num'] = try_cast_int_series(resumen_display['Lote_num'])
+        resumen_display['Lote_num'] = try_cast_int_series_safe(resumen_display['Lote_num'])
     if 'Golf_num' in resumen_display.columns:
-        resumen_display['Golf_num'] = try_cast_int_series(resumen_display['Golf_num'])
+        resumen_display['Golf_num'] = try_cast_int_series_safe(resumen_display['Golf_num'])
 
     # Para la vista: preferir la columna numérica (sin .0 si fue casteada a Int64),
     # y si no existe, dejar la versión textual original.
     def prefer_num_or_raw(df, col_raw, col_num):
         df = df.copy()
         if col_num in df.columns:
+            # usar where con notna() — no hace int('') ni conversiones inseguras
             df[col_raw] = df[col_num].where(df[col_num].notna(), df[col_raw])
         return df
 
@@ -396,11 +391,9 @@ if st.session_state.get('df_detalle_display') is not None:
     show_aggrid(df_det_show[cols_det], height=400, page_size=page_size)
     # Para descarga: formatear Lote/Golf de forma segura
     df_det_export = df_det_show[cols_det].copy()
-    # Reemplazar cadenas vacías por NA para evitar int('') en conversiones internas
     for c in ['Lote','Golf']:
         if c in df_det_export.columns:
-            df_det_export[c] = df_det_export[c].replace('', pd.NA)
-            df_det_export[c] = df_det_export[c].apply(format_for_export)
+            df_det_export[c] = df_det_export[c].apply(safe_int_like_to_str)
     csv_det = df_det_export.to_csv(index=False).encode('utf-8')
     st.download_button("Descargar detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv")
 
@@ -414,8 +407,7 @@ if st.session_state.get('res_sorted') is not None:
     df_res_export = res_sorted_df[cols_res + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])].copy()
     for c in ['Lote','Golf']:
         if c in df_res_export.columns:
-            df_res_export[c] = df_res_export[c].replace('', pd.NA)
-            df_res_export[c] = df_res_export[c].apply(format_for_export)
+            df_res_export[c] = df_res_export[c].apply(safe_int_like_to_str)
     csv_res = df_res_export.to_csv(index=False).encode('utf-8')
     st.download_button("Descargar resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv")
 
