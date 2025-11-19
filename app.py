@@ -8,7 +8,7 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.5"
+VERSION = "4.6"
 
 # ---------- inicializar session_state ----------
 if 'df_detalle_display' not in st.session_state:
@@ -17,6 +17,8 @@ if 'res_sorted' not in st.session_state:
     st.session_state['res_sorted'] = None
 if 'processed' not in st.session_state:
     st.session_state['processed'] = False
+if 'search_lote' not in st.session_state:
+    st.session_state['search_lote'] = ''
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -170,7 +172,6 @@ if file_personas and file_banco and run_button:
     df_detalle = pd.DataFrame(resultados)
     if df_detalle.empty:
         st.info("No se encontraron coincidencias.")
-        # limpiar session_state processed
         st.session_state['processed'] = False
         st.session_state['df_detalle_display'] = None
         st.session_state['res_sorted'] = None
@@ -217,12 +218,15 @@ if st.session_state.get('processed', False) and st.session_state['df_detalle_dis
     df_detalle_display = st.session_state['df_detalle_display']
     res_sorted = st.session_state['res_sorted']
 
-    # Usamos un text_input con key; al presionar Enter la app reruneará pero los datos persisten en session_state
-    search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value=st.session_state.get('search_lote',''), key="search_lote")
-    # Guardar el valor en session_state para mantenerlo entre reruns
-    st.session_state['search_lote'] = search_lote
+    # Crear text_input usando el valor guardado en session_state; NO reasignar manualmente después
+    search_lote = st.text_input(
+        "Ingresá número de lote para buscar (ej: 41)",
+        value=st.session_state.get('search_lote', ''),
+        key="search_lote"
+    )
 
     if search_lote:
+        # No reasignar st.session_state['search_lote'] aquí; el widget actualiza session_state automáticamente
         search_lower = str(search_lote).strip().lower()
         mask_det = df_detalle_display['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
         matches_det = df_detalle_display[mask_det]
@@ -261,4 +265,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.5
+# Versión: 4.6
