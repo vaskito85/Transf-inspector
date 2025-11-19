@@ -1,13 +1,14 @@
 # streamlit_app.py
 import io
 import re
+import traceback
 import pandas as pd
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.6"
+VERSION = "5.6.1"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -24,6 +25,7 @@ with col_logo:
     st.image(make_logo(size=48), width=48)
 with col_title:
     st.title("Buscador CUIT - Movimientos")
+st.caption(f"Versión de la app: {VERSION}")
 
 # ---------- inicializar session_state ----------
 if 'uploaded_personas_bytes' not in st.session_state:
@@ -65,23 +67,12 @@ def format_currency_ar(value):
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
-def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
-    """
-    Intentar convertir a Int64 solo si todos los valores no nulos son enteros.
-    Esta versión es robusta y no lanza int('') porque usa to_numeric(errors='coerce').
-    """
-    try:
-        s2 = s.copy()
-        # convertir a num (coerce convierte '' a NaN)
-        numeric = pd.to_numeric(s2, errors='coerce')
-        non_null = numeric.dropna()
-        if non_null.empty:
-            return s2
-        if (non_null % 1 == 0).all():
-            return numeric.astype('Int64')
-        return s2
-    except Exception:
-        return s
+# ---------- funciones seguras para conversión y exportación ----------
+def is_integer_string(s: str) -> bool:
+    return bool(re.fullmatch(r'[+-]?\d+', s.strip()))
+
+def is_float_string(s: str) -> bool:
+    return bool(re.fullmatch(r'[+-]?\d+\.\d+', s.strip()))
 
 def safe_int_like_to_str(v):
     """
@@ -91,19 +82,16 @@ def safe_int_like_to_str(v):
     try:
         if pd.isna(v):
             return ''
-        # pandas nullable Int64
+        # Python int (no bool)
+        if isinstance(v, int) and not isinstance(v, bool):
+            return str(v)
+        # numpy integer types
         try:
             import numpy as np
             if isinstance(v, (np.integer,)):
                 return str(int(v))
         except Exception:
             pass
-        if isinstance(v, int) and not isinstance(v, bool):
-            return str(v)
-        if isinstance(v, float):
-            if float(v).is_integer():
-                return str(int(v))
-            return str(v)
         # pandas scalar with .item()
         try:
             if hasattr(v, 'item'):
@@ -116,15 +104,19 @@ def safe_int_like_to_str(v):
                     return str(vv)
         except Exception:
             pass
+        # float
+        if isinstance(v, float):
+            if float(v).is_integer():
+                return str(int(v))
+            return str(v)
+        # string handling
         if isinstance(v, str):
             s = v.strip()
             if s == '':
                 return ''
-            # entero en string
-            if re.fullmatch(r'[+-]?\d+', s):
+            if is_integer_string(s):
                 return s
-            # float en string que es entero "186.0"
-            if re.fullmatch(r'[+-]?\d+\.\d+', s):
+            if is_float_string(s):
                 try:
                     f = float(s)
                     if f.is_integer():
@@ -133,10 +125,40 @@ def safe_int_like_to_str(v):
                     pass
             return s
         # fallback
-        return str(v)
+        s = str(v).strip()
+        if s == '':
+            return ''
+        if is_integer_string(s):
+            return s
+        if is_float_string(s):
+            try:
+                f = float(s)
+                if f.is_integer():
+                    return str(int(f))
+            except Exception:
+                pass
+        return s
     except Exception:
         return ''
 
+def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
+    """
+    Intentar convertir a Int64 solo si todos los valores no nulos son enteros.
+    Usa to_numeric(errors='coerce') para evitar int('') y es robusto.
+    """
+    try:
+        s2 = s.copy()
+        numeric = pd.to_numeric(s2, errors='coerce')  # '' -> NaN
+        non_null = numeric.dropna()
+        if non_null.empty:
+            return s2
+        if (non_null % 1 == 0).all():
+            return numeric.astype('Int64')
+        return s2
+    except Exception:
+        return s
+
+# ---------- lectura segura de Excel desde bytes ----------
 @st.cache_data
 def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
     buf = io.BytesIO(buf_bytes)
@@ -291,7 +313,6 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     def prefer_num_or_raw(df, col_raw, col_num):
         df = df.copy()
         if col_num in df.columns:
-            # usar where con notna() — no hace int('') ni conversiones inseguras
             df[col_raw] = df[col_num].where(df[col_num].notna(), df[col_raw])
         return df
 
@@ -329,31 +350,50 @@ with st.form("procesar_form"):
     st.write("Pulsa Procesar archivos para extraer coincidencias.")
     submit = st.form_submit_button("Procesar archivos")
     if submit:
-        if not st.session_state.get('uploaded_personas_bytes') or not st.session_state.get('uploaded_banco_bytes'):
-            st.error("Subí ambos archivos antes de procesar.")
-        else:
-            try:
-                df_detalle_display, res_sorted = process_files(
-                    st.session_state['uploaded_personas_bytes'],
-                    st.session_state['uploaded_banco_bytes'],
-                    st.session_state.get('uploaded_personas_name',''),
-                    st.session_state.get('uploaded_banco_name','')
-                )
-            except Exception as e:
-                st.error(f"Error en procesamiento: {e}")
-                st.stop()
+        # Captura robusta de errores para mostrar traceback y primeras filas para depuración
+        try:
+            df_detalle_display, res_sorted = process_files(
+                st.session_state['uploaded_personas_bytes'],
+                st.session_state['uploaded_banco_bytes'],
+                st.session_state.get('uploaded_personas_name',''),
+                st.session_state.get('uploaded_banco_name','')
+            )
+        except Exception as e:
+            st.error(f"Error en procesamiento: {e}")
+            st.text("Traceback (detalles técnicos):")
+            st.text(traceback.format_exc())
 
-            if df_detalle_display.empty:
-                st.info("No se encontraron coincidencias.")
-                st.session_state['df_detalle_display'] = None
-                st.session_state['res_sorted'] = None
-                st.session_state['processed'] = False
-            else:
-                # Guardar copias limpias en session_state
-                st.session_state['df_detalle_display'] = df_detalle_display.copy()
-                st.session_state['res_sorted'] = res_sorted.copy()
-                st.session_state['processed'] = True
-                st.success("Procesamiento finalizado y resultados guardados.")
+            # Intentar leer y mostrar las primeras filas de los archivos subidos para depuración
+            try:
+                personas_df = read_excel_bytes_from_buffer(
+                    st.session_state['uploaded_personas_bytes'],
+                    ext_hint=st.session_state.get('uploaded_personas_name','').split('.')[-1] if st.session_state.get('uploaded_personas_name') else None
+                )
+                banco_df = read_excel_bytes_from_buffer(
+                    st.session_state['uploaded_banco_bytes'],
+                    ext_hint=st.session_state.get('uploaded_banco_name','').split('.')[-1] if st.session_state.get('uploaded_banco_name') else None
+                )
+                st.markdown("**Primeras filas del archivo de personas (para depuración):**")
+                st.dataframe(personas_df.head(10))
+                st.markdown("**Primeras filas del archivo bancario (para depuración):**")
+                st.dataframe(banco_df.head(10))
+            except Exception as e2:
+                st.text(f"No se pudieron leer los archivos para depuración: {e2}")
+
+            st.info("Reiniciá la app (detener y volver a ejecutar) si el error persiste.")
+            st.stop()
+
+        if df_detalle_display.empty:
+            st.info("No se encontraron coincidencias.")
+            st.session_state['df_detalle_display'] = None
+            st.session_state['res_sorted'] = None
+            st.session_state['processed'] = False
+        else:
+            # Guardar copias limpias en session_state
+            st.session_state['df_detalle_display'] = df_detalle_display.copy()
+            st.session_state['res_sorted'] = res_sorted.copy()
+            st.session_state['processed'] = True
+            st.success("Procesamiento finalizado y resultados guardados.")
 
 # ---------- selector page size ----------
 page_choice = st.selectbox("Tamaño de página", options=["25","50","75","100","All"], index=0)
