@@ -8,7 +8,7 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.10"
+VERSION = "4.11"
 
 # ---------- inicializar session_state ----------
 # Si se pidió reset en la ejecución anterior, limpiar ahora (antes de crear widgets)
@@ -39,6 +39,26 @@ if 'processed' not in st.session_state:
     st.session_state['processed'] = False
 if 'search_lote' not in st.session_state:
     st.session_state['search_lote'] = ''
+
+# ---------- DEBUG TEMPORAL - mostrar estado actual de session_state ----------
+st.markdown("#### DEBUG session_state (temporal)")
+try:
+    debug_summary = {k: (type(v).__name__ if v is not None else 'None') for k, v in st.session_state.items()}
+    st.write(debug_summary)
+    if st.session_state.get('df_detalle_display') is not None:
+        try:
+            st.write("Detalle filas:", len(st.session_state['df_detalle_display']))
+        except Exception:
+            st.write("Detalle filas: (no se puede medir longitud)")
+    if st.session_state.get('res_sorted') is not None:
+        try:
+            st.write("Resumen filas:", len(st.session_state['res_sorted']))
+        except Exception:
+            st.write("Resumen filas: (no se puede medir longitud)")
+except Exception as e:
+    st.write("DEBUG error:", str(e))
+st.markdown("---")
+# Fin DEBUG (quitar este bloque cuando ya no haga falta)
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -303,4 +323,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.10
+# Versión: 4.11
