@@ -8,7 +8,7 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.12"
+VERSION = "4.13"
 
 # ---------- inicializar session_state ----------
 # Si se pidió reset en la ejecución anterior, limpiar ahora (antes de crear widgets)
@@ -39,26 +39,6 @@ if 'processed' not in st.session_state:
     st.session_state['processed'] = False
 if 'search_lote' not in st.session_state:
     st.session_state['search_lote'] = ''
-
-# ---------- DEBUG TEMPORAL - mostrar estado actual de session_state ----------
-st.markdown("#### DEBUG session_state (temporal)")
-try:
-    debug_summary = {k: (type(v).__name__ if v is not None else 'None') for k, v in st.session_state.items()}
-    st.write(debug_summary)
-    if st.session_state.get('df_detalle_display') is not None:
-        try:
-            st.write("Detalle filas:", len(st.session_state['df_detalle_display']))
-        except Exception:
-            st.write("Detalle filas: (no se puede medir longitud)")
-    if st.session_state.get('res_sorted') is not None:
-        try:
-            st.write("Resumen filas:", len(st.session_state['res_sorted']))
-        except Exception:
-            st.write("Resumen filas: (no se puede medir longitud)")
-except Exception as e:
-    st.write("DEBUG error:", str(e))
-st.markdown("---")
-# Fin DEBUG (quitar este bloque cuando ya no haga falta)
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -242,9 +222,6 @@ with st.form("procesar_form"):
                 df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote','Golf','Valor_formateado','Concepto encontrado']].copy()
                 df_detalle_display = df_detalle_display.rename(columns={'Fecha_str': 'Fecha','Valor_formateado': 'Valor transferido'})
 
-                st.subheader("Detalle de coincidencias")
-                st.dataframe(df_detalle_display)
-
                 df_resumen = df_detalle.copy()
                 df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
                 resumen = df_resumen.groupby(['Cuit/Cuil','Nombre','Lote','Golf'], as_index=False)['Valor_num'].sum()
@@ -253,20 +230,18 @@ with st.form("procesar_form"):
                 resumen_display = resumen[['Cuit/Cuil','Nombre','Lote','Golf','Suma total','Suma_total_num']].copy()
                 res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
-                st.subheader("Resumen (suma por Cuit/Cuil)")
-                st.dataframe(res_sorted[['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
-
                 # Guardar resultados en session_state para persistir entre reruns
                 st.session_state['df_detalle_display'] = df_detalle_display
                 st.session_state['res_sorted'] = res_sorted
                 st.session_state['processed'] = True
 
-            st.success("Procesamiento finalizado.")
+            st.success("Procesamiento finalizado. Los resultados se guardaron y se mostrarán como persistentes.")
 
-# ---------- Mostrar resultados guardados siempre si existen ----------
+# ---------- Mostrar solo las tablas persistentes ----------
+# Evitamos mostrar duplicados: siempre mostramos únicamente las tablas guardadas en session_state.
 if st.session_state.get('df_detalle_display') is not None:
     st.markdown("---")
-    st.subheader("Detalle guardado (persistente)")
+    st.subheader("Detalle guardado")
     try:
         st.dataframe(st.session_state['df_detalle_display'])
     except Exception:
@@ -274,7 +249,7 @@ if st.session_state.get('df_detalle_display') is not None:
 
 if st.session_state.get('res_sorted') is not None:
     st.markdown("---")
-    st.subheader("Resumen guardado (persistente)")
+    st.subheader("Resumen guardado")
     try:
         st.dataframe(st.session_state['res_sorted'][['Cuit/Cuil','Nombre','Lote','Golf','Suma total']])
     except Exception:
@@ -340,4 +315,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.12
+# Versión: 4.13
