@@ -1,5 +1,6 @@
-streamlit>=1.20
-pandas>=2.0.1
-numpy>=1.23
-openpyxl>=3.0
+streamlit
+pandas
+numpy
+openpyxl
+xlrd
 pyahocorasick>=1.4  # opcional
