@@ -8,9 +8,19 @@ st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
 st.title("Buscar CUIT en movimientos bancarios")
 
 # Versión de la app
-VERSION = "4.9"
+VERSION = "4.10"
 
 # ---------- inicializar session_state ----------
+# Si se pidió reset en la ejecución anterior, limpiar ahora (antes de crear widgets)
+if 'do_reset' in st.session_state and st.session_state.get('do_reset'):
+    for k in ['uploaded_personas_bytes','uploaded_banco_bytes','uploaded_personas_name','uploaded_banco_name',
+              'df_detalle_display','res_sorted','processed','search_lote','do_reset']:
+        if k in st.session_state:
+            del st.session_state[k]
+    # Terminamos esta ejecución; la siguiente ejecución arrancará con estado limpio
+    st.stop()
+
+# Inicializaciones seguras (si no existen)
 if 'do_reset' not in st.session_state:
     st.session_state['do_reset'] = False
 if 'uploaded_personas_bytes' not in st.session_state:
@@ -29,15 +39,6 @@ if 'processed' not in st.session_state:
     st.session_state['processed'] = False
 if 'search_lote' not in st.session_state:
     st.session_state['search_lote'] = ''
-
-# Si se pidió reset en la ejecución anterior, limpiar ahora (antes de crear widgets)
-if st.session_state.get('do_reset', False):
-    for k in ['uploaded_personas_bytes','uploaded_banco_bytes','uploaded_personas_name','uploaded_banco_name',
-              'df_detalle_display','res_sorted','processed','search_lote']:
-        if k in st.session_state:
-            del st.session_state[k]
-    st.session_state['do_reset'] = False
-    # No forzamos rerun con experimental_rerun para compatibilidad; el estado ya quedó limpio.
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -249,7 +250,7 @@ st.subheader("Buscar por Lote (resalta coincidencias)")
 # Botón Reset: activa la bandera do_reset (la limpieza se hace al inicio de la siguiente ejecución)
 if st.button("Resetear resultados"):
     st.session_state['do_reset'] = True
-    st.success("Se solicitó reset. La página se recargará automáticamente o recargala manualmente para ver el estado limpio.")
+    st.success("Se solicitó reset. Recargá la página si no se actualiza automáticamente.")
 
 if st.session_state.get('processed', False) and st.session_state['df_detalle_display'] is not None and st.session_state['res_sorted'] is not None:
     df_detalle_display = st.session_state['df_detalle_display']
@@ -302,4 +303,4 @@ else:
 # Mostrar versión en la interfaz
 st.caption(f"Versión de la app: {VERSION}")
 
-# Versión: 4.9
+# Versión: 4.10
