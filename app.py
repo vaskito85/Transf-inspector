@@ -8,7 +8,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.6.2"
+VERSION = "5.6.3"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -402,7 +402,7 @@ with st.form("procesar_form"):
             st.success("Procesamiento finalizado y resultados guardados.")
 
 # ---------- selector page size ----------
-page_choice = st.selectbox("Tamaño de página", options=["25","50","75","100","All"], index=0)
+page_choice = st.selectbox("Tamaño de página", options=["25","50","75","100","200","All"], index=0)
 page_size = None if page_choice == "All" else int(page_choice)
 
 # ---------- helper AgGrid (rangos, copia, paginación opcional) ----------
