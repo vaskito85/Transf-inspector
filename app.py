@@ -1,4 +1,3 @@
-# streamlit_app.py
 import io
 import re
 import traceback
@@ -8,7 +7,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.6.3"
+VERSION = "5.6.4"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -226,11 +225,23 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
                 golf = ''
                 cuit_display = f
             else:
-                rowp = p.iloc[0]
-                nombre = rowp.get(nombre_col, '') if nombre_col else ''
-                lote = rowp.get(lote_col, '') if lote_col else ''
-                golf = rowp.get(golf_col, '') if golf_col else ''
-                cuit_display = rowp.get('cuit_raw', f)
+                # ---------- MODIFICACIÓN: concatenar todos los valores asociados al CUIT ----------
+                nombres = p[nombre_col].astype(str).str.strip().replace('nan','').replace('None','') if nombre_col else pd.Series([])
+                nombres_unique = [n for n in pd.unique(nombres) if n]
+                nombre = " / ".join(nombres_unique)
+
+                lotes = p[lote_col].astype(str).str.strip().replace('nan','').replace('None','') if lote_col else pd.Series([])
+                lotes_unique = [l for l in pd.unique(lotes) if l]
+                lote = " / ".join(lotes_unique)
+
+                golfs = p[golf_col].astype(str).str.strip().replace('nan','').replace('None','') if golf_col else pd.Series([])
+                golfs_unique = [g for g in pd.unique(golfs) if g]
+                golf = " / ".join(golfs_unique)
+
+                cuit_raws = p['cuit_raw'].astype(str).str.strip().replace('nan','').replace('None','')
+                cuit_display = (pd.unique(cuit_raws)[0] if len(pd.unique(cuit_raws)) > 0 else f)
+                # ---------- FIN MODIFICACIÓN ----------
+
             credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
             credito_str = str(credito_val).strip()
             credito_str = re.sub(r'[^\d,.\-]', '', credito_str)
