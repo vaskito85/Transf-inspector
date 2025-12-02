@@ -7,7 +7,7 @@ from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.6.4"
+VERSION = "5.6.5"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -27,22 +27,18 @@ with col_title:
 st.caption(f"Versión de la app: {VERSION}")
 
 # ---------- inicializar session_state ----------
-if 'uploaded_personas_bytes' not in st.session_state:
-    st.session_state['uploaded_personas_bytes'] = None
-if 'uploaded_banco_bytes' not in st.session_state:
-    st.session_state['uploaded_banco_bytes'] = None
-if 'uploaded_personas_name' not in st.session_state:
-    st.session_state['uploaded_personas_name'] = ''
-if 'uploaded_banco_name' not in st.session_state:
-    st.session_state['uploaded_banco_name'] = ''
-if 'df_detalle_display' not in st.session_state:
-    st.session_state['df_detalle_display'] = None
-if 'res_sorted' not in st.session_state:
-    st.session_state['res_sorted'] = None
-if 'processed' not in st.session_state:
-    st.session_state['processed'] = False
-if 'search_lote' not in st.session_state:
-    st.session_state['search_lote'] = ''
+for key, default in {
+    'uploaded_personas_bytes': None,
+    'uploaded_banco_bytes': None,
+    'uploaded_personas_name': '',
+    'uploaded_banco_name': '',
+    'df_detalle_display': None,
+    'res_sorted': None,
+    'processed': False,
+    'search_lote': ''
+}.items():
+    if key not in st.session_state:
+        st.session_state[key] = default
 
 # ---------- utilidades ----------
 def find_col(df, keywords):
@@ -66,7 +62,6 @@ def format_currency_ar(value):
     s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
-# ---------- funciones seguras para conversión y exportación ----------
 def is_integer_string(s: str) -> bool:
     return bool(re.fullmatch(r'[+-]?\d+', s.strip()))
 
@@ -74,24 +69,17 @@ def is_float_string(s: str) -> bool:
     return bool(re.fullmatch(r'[+-]?\d+\.\d+', s.strip()))
 
 def safe_int_like_to_str(v):
-    """
-    Convierte de forma segura a string sin .0 cuando corresponde.
-    Nunca hace int('') ni lanza ValueError por cadena vacía.
-    """
     try:
         if pd.isna(v):
             return ''
-        # Python int (no bool)
         if isinstance(v, int) and not isinstance(v, bool):
             return str(v)
-        # numpy integer types
         try:
             import numpy as np
             if isinstance(v, (np.integer,)):
                 return str(int(v))
         except Exception:
             pass
-        # pandas scalar with .item()
         try:
             if hasattr(v, 'item'):
                 vv = v.item()
@@ -103,12 +91,10 @@ def safe_int_like_to_str(v):
                     return str(vv)
         except Exception:
             pass
-        # float
         if isinstance(v, float):
             if float(v).is_integer():
                 return str(int(v))
             return str(v)
-        # string handling
         if isinstance(v, str):
             s = v.strip()
             if s == '':
@@ -123,7 +109,6 @@ def safe_int_like_to_str(v):
                 except Exception:
                     pass
             return s
-        # fallback
         s = str(v).strip()
         if s == '':
             return ''
@@ -141,13 +126,9 @@ def safe_int_like_to_str(v):
         return ''
 
 def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
-    """
-    Intentar convertir a Int64 solo si todos los valores no nulos son enteros.
-    Usa to_numeric(errors='coerce') para evitar int('') y es robusto.
-    """
     try:
         s2 = s.copy()
-        numeric = pd.to_numeric(s2, errors='coerce')  # '' -> NaN
+        numeric = pd.to_numeric(s2, errors='coerce')
         non_null = numeric.dropna()
         if non_null.empty:
             return s2
@@ -157,7 +138,7 @@ def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
     except Exception:
         return s
 
-# ---------- lectura segura de Excel desde bytes ----------
+# ---------- lectura segura de Excel ----------
 @st.cache_data
 def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
     buf = io.BytesIO(buf_bytes)
@@ -170,7 +151,7 @@ def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
         buf.seek(0)
         return pd.read_excel(buf, dtype=str).fillna('')
 
-# ---------- procesamiento principal (vectorizado, con columnas raw y num) ----------
+# ---------- procesamiento principal ----------
 @st.cache_data
 def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     personas = read_excel_bytes_from_buffer(personas_bytes, ext_hint=(personas_name.split('.')[-1] if personas_name else None))
@@ -225,7 +206,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
                 golf = ''
                 cuit_display = f
             else:
-                # ---------- MODIFICACIÓN: concatenar todos los valores asociados al CUIT ----------
+                # Concatenar todos los valores asociados al CUIT (visualización)
                 nombres = p[nombre_col].astype(str).str.strip().replace('nan','').replace('None','') if nombre_col else pd.Series([])
                 nombres_unique = [n for n in pd.unique(nombres) if n]
                 nombre = " / ".join(nombres_unique)
@@ -240,7 +221,6 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
 
                 cuit_raws = p['cuit_raw'].astype(str).str.strip().replace('nan','').replace('None','')
                 cuit_display = (pd.unique(cuit_raws)[0] if len(pd.unique(cuit_raws)) > 0 else f)
-                # ---------- FIN MODIFICACIÓN ----------
 
             credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
             credito_str = str(credito_val).strip()
@@ -275,13 +255,13 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     df_detalle['Fecha_str'] = df_detalle['Fecha'].dt.strftime('%Y-%m-%d').fillna('')
     df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
 
-    # --- mantener columnas raw para agrupación/búsqueda y columnas numéricas separadas para ordenamiento ---
+    # Mantener columnas raw para agrupación/búsqueda y numéricas separadas para ordenamiento
     for _col in ['Lote', 'Golf']:
         if _col in df_detalle.columns:
             df_detalle[f"{_col}_raw"] = df_detalle[_col].astype(str).replace('nan', '').replace('None', '')
             df_detalle[f"{_col}_num"] = pd.to_numeric(df_detalle[_col].replace('', pd.NA), errors='coerce')
 
-    # Preparar df_detalle_display: incluir raw y num (guardamos ambos)
+    # Preparar df_detalle_display
     df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Lote_num','Golf_num','Valor_formateado','Concepto encontrado']].copy()
     df_detalle_display = df_detalle_display.rename(columns={
         'Fecha_str': 'Fecha',
@@ -290,25 +270,28 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
         'Valor_formateado': 'Valor transferido'
     })
 
-    # Construir resumen agrupando por las columnas raw (evitamos perder grupos por coerción)
+    # ---------- NUEVO: resumen suma por CUIT/Lote/Golf (independiente del nombre) ----------
     df_resumen = df_detalle.copy()
     df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
 
-    resumen = df_resumen.groupby(['Cuit/Cuil','Nombre','Lote_raw','Golf_raw'], as_index=False)['Valor_num'].sum()
-    resumen = resumen.rename(columns={'Valor_num':'Suma_total_num'})
+    # Concatenar todos los nombres asociados a cada CUIT para mostrar en el resumen
+    nombres_map = df_resumen.groupby('Cuit/Cuil')['Nombre'].apply(lambda x: " / ".join(pd.unique(x))).to_dict()
+
+    resumen = df_resumen.groupby(['Cuit/Cuil','Lote_raw','Golf_raw'], as_index=False)['Valor_num'].sum()
+    resumen['Nombre'] = resumen['Cuit/Cuil'].map(nombres_map)
+    resumen = resumen.rename(columns={'Valor_num': 'Suma_total_num'})
     resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
 
     # Mapear valores numéricos para ordenamiento en resumen
     map_lote_num = df_detalle.dropna(subset=['Lote_num']).drop_duplicates('Lote_raw').set_index('Lote_raw')['Lote_num'].to_dict()
     map_golf_num = df_detalle.dropna(subset=['Golf_num']).drop_duplicates('Golf_raw').set_index('Golf_raw')['Golf_num'].to_dict()
-
     resumen['Lote_num'] = resumen['Lote_raw'].map(map_lote_num)
     resumen['Golf_num'] = resumen['Golf_raw'].map(map_golf_num)
 
     resumen_display = resumen[['Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Suma total','Suma_total_num','Lote_num','Golf_num']].copy()
     resumen_display = resumen_display.rename(columns={'Lote_raw':'Lote','Golf_raw':'Golf'})
 
-    # ---------- Ajuste final: convertir columnas numéricas a Int64 cuando sea posible (seguro)
+    # ---------- Ajuste final: convertir columnas numéricas a Int64 cuando sea posible ----------
     if 'Lote_num' in df_detalle_display.columns:
         df_detalle_display['Lote_num'] = try_cast_int_series_safe(df_detalle_display['Lote_num'])
     if 'Golf_num' in df_detalle_display.columns:
@@ -319,15 +302,10 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     if 'Golf_num' in resumen_display.columns:
         resumen_display['Golf_num'] = try_cast_int_series_safe(resumen_display['Golf_num'])
 
-    # ---------- prefer_num_or_raw seguro (evita coerción int('') al mezclar tipos) ----------
+    # prefer_num_or_raw seguro (evita coerción int('') al mezclar tipos)
     def prefer_num_or_raw(df, col_raw, col_num):
-        """
-        Devuelve df donde la columna col_raw se reemplaza por col_num cuando col_num no es NA.
-        Esta versión evita errores de coerción forzando ambas columnas a object antes del where.
-        """
         df = df.copy()
         if col_num in df.columns:
-            # forzar ambas columnas a object para evitar coerción a dtype numérico
             col_num_obj = df[col_num].astype(object)
             col_raw_obj = df[col_raw].astype(object) if col_raw in df.columns else pd.Series([''] * len(df), index=df.index, dtype=object)
             df[col_raw] = col_num_obj.where(col_num_obj.notna(), col_raw_obj)
@@ -342,7 +320,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     # Ordenar resumen por suma
     res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
-    # Antes de devolver: normalizar nombres y devolver copias limpias
+    # Devolver copias limpias
     df_detalle_display_to_save = df_detalle_display.copy()
     res_sorted_to_save = res_sorted.copy()
 
@@ -367,7 +345,6 @@ with st.form("procesar_form"):
     st.write("Pulsa Procesar archivos para extraer coincidencias.")
     submit = st.form_submit_button("Procesar archivos")
     if submit:
-        # Captura robusta de errores para mostrar traceback y primeras filas para depuración
         try:
             df_detalle_display, res_sorted = process_files(
                 st.session_state['uploaded_personas_bytes'],
@@ -406,7 +383,6 @@ with st.form("procesar_form"):
             st.session_state['res_sorted'] = None
             st.session_state['processed'] = False
         else:
-            # Guardar copias limpias en session_state
             st.session_state['df_detalle_display'] = df_detalle_display.copy()
             st.session_state['res_sorted'] = res_sorted.copy()
             st.session_state['processed'] = True
@@ -416,7 +392,7 @@ with st.form("procesar_form"):
 page_choice = st.selectbox("Tamaño de página", options=["25","50","75","100","200","All"], index=0)
 page_size = None if page_choice == "All" else int(page_choice)
 
-# ---------- helper AgGrid (rangos, copia, paginación opcional) ----------
+# ---------- helper AgGrid ----------
 def show_aggrid(df, height=400, page_size=25):
     df_display = df.copy()
     gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -438,7 +414,7 @@ def show_aggrid(df, height=400, page_size=25):
         allow_unsafe_jscode=True,
     )
 
-# ---------- Mostrar tablas persistentes (Ag-Grid) ----------
+# ---------- Mostrar tablas persistentes ----------
 if st.session_state.get('df_detalle_display') is not None:
     st.markdown("---")
     st.subheader("Detalle guardado")
@@ -446,7 +422,7 @@ if st.session_state.get('df_detalle_display') is not None:
     cols_det = ['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
     cols_det = [c for c in cols_det if c in df_det_show.columns]
     show_aggrid(df_det_show[cols_det], height=400, page_size=page_size)
-    # Para descarga: formatear Lote/Golf de forma segura
+    # Export detalle CSV
     df_det_export = df_det_show[cols_det].copy()
     for c in ['Lote','Golf']:
         if c in df_det_export.columns:
@@ -461,6 +437,7 @@ if st.session_state.get('res_sorted') is not None:
     cols_res = ['Cuit/Cuil','Nombre','Lote','Golf','Suma total']
     cols_res = [c for c in cols_res if c in res_sorted_df.columns]
     show_aggrid(res_sorted_df[cols_res], height=300, page_size=page_size)
+    # Export resumen CSV
     df_res_export = res_sorted_df[cols_res + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])].copy()
     for c in ['Lote','Golf']:
         if c in df_res_export.columns:
@@ -468,10 +445,9 @@ if st.session_state.get('res_sorted') is not None:
     csv_res = df_res_export.to_csv(index=False).encode('utf-8')
     st.download_button("Descargar resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv")
 
-# ---------- Buscador por Lote persistente (filtrado seguro sin SettingWithCopyWarning) ----------
+# ---------- Buscador por Lote ----------
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
-
 search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value=st.session_state.get('search_lote',''), key="search_lote")
 
 if search_lote and st.session_state.get('df_detalle_display') is not None:
