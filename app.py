@@ -1,17 +1,16 @@
 import io
 import re
-import math
 import traceback
 import pandas as pd
 import streamlit as st
-from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
+from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode, JsCode
 from PIL import Image, ImageDraw
 
 # =========================
 # Config general
 # =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide", page_icon="🔎")
-VERSION = "7.1.0"
+VERSION = "7.1.1"
 
 # ---------- Estilos (CSS ligero) ----------
 CSS = """
@@ -19,12 +18,8 @@ CSS = """
 :root {
   --brand: #1976d2;
   --brand-2: #0d47a1;
-  --success: #15a362;
-  --warning: #f59e0b;
-  --danger: #e11d48;
-  --muted: #64748b;
 }
-html, body, [class*="css"]  { font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+html, body, [class*="css"]  { font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial; }
 section.main > div { padding-top: 1rem; }
 
 /* Hero */
@@ -42,20 +37,6 @@ section.main > div { padding-top: 1rem; }
   background: rgba(25,118,210,.08); color: var(--brand-2); border: 1px solid rgba(25,118,210,.2);
 }
 
-/* Cards simples */
-.card {
-  border-radius: 12px; padding: 16px;
-  border: 1px solid rgba(100,116,139,.25);
-  background: rgba(148,163,184,.06);
-}
-.card h4 { margin:.1rem 0 .5rem 0; }
-
-/* Botonera sticky */
-.sticky-actions {
-  position: sticky; top: -10px; z-index: 11; padding: .5rem 0 .8rem 0;
-  background: transparent;
-}
-
 /* Badges */
 .badge {
   display:inline-block; border-radius: 999px; padding:.15rem .5rem; font-size:.75rem; font-weight:600;
@@ -64,10 +45,11 @@ section.main > div { padding-top: 1rem; }
 .badge-unknown { color:#a855f7; border-color:#a855f7; background: rgba(168,85,247,.08); }
 .badge-listed  { color:#16a34a; border-color:#16a34a; background: rgba(22,163,74,.08); }
 
-/* Descargas */
+/* Botonera sticky */
+.sticky-actions { position: sticky; top: -10px; z-index: 11; padding: .5rem 0 .8rem 0; }
 .downloads { display:flex; gap:.5rem; flex-wrap:wrap; }
 
-/* Encabezados de sección */
+/* Encabezados */
 h3 span.icon { font-size: 1.25rem; opacity:.9; margin-right:.3rem }
 
 /* Ocultar footer */
@@ -76,7 +58,7 @@ footer {visibility: hidden;}
 """
 st.markdown(CSS, unsafe_allow_html=True)
 
-# ---------- pequeño logo (vector simple) ----------
+# ---------- pequeño logo ----------
 def make_logo(size=56, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
     img = Image.new("RGBA", (size, size), bg_color)
     draw = ImageDraw.Draw(img)
@@ -101,7 +83,8 @@ for key, default in {
     'search_lote': '',
     'search_kw': '',
     'search_cuit': '',
-    'kpis': {}
+    'kpis': {},
+    'page_size': 25
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -453,7 +436,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
 
     res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
-    # KPIs (mejor: desde valores numéricos reales)
+    # KPIs
     kpis = {
         "Movimientos detectados": len(df_detalle_display),
         "CUITs únicos": df_detalle_display['Cuit/Cuil'].nunique() if 'Cuit/Cuil' in df_detalle_display.columns else 0,
@@ -468,8 +451,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
 # =========================
 with st.container():
     c1, c2 = st.columns([1, 8])
-    with c1:
-        st.image(make_logo(), width=56)
+    with c1: st.image(make_logo(), width=56)
     with c2:
         st.markdown(f"""
         <div class="hero">
@@ -486,19 +468,24 @@ with st.container():
 st.write("")
 
 # =========================
-# Helper de grilla (con key)
+# Helper de grilla (con JsCode y key)
 # =========================
 def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, theme="alpine"):
     df_display = df.copy()
 
-    # Render de badge para "CUIT listado"
+    # Asegurar strings en columnas textuales (evita .includes sobre tipos no string)
+    for col in ['CUIT listado', 'Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Fecha', 'Concepto encontrado']:
+        if col in df_display.columns:
+            df_display[col] = df_display[col].astype(str)
+
+    # Decorar "CUIT listado" con badge si corresponde
     if enable_badge and 'CUIT listado' in df_display.columns:
         df_display['CUIT listado'] = df_display['CUIT listado'].map(
             lambda v: f'<span class="badge {"badge-listed" if v=="Sí" else "badge-unknown"}">{v}</span>'
         )
 
     gb = GridOptionsBuilder.from_dataframe(df_display, enableValue=True, enableRowGroup=True, enablePivot=True)
-    gb.configure_default_column(filterable=True, sortable=True, resizable=True, tooltipField=True)
+    gb.configure_default_column(filterable=True, sortable=True, resizable=True)
     gb.configure_grid_options(domLayout='normal', rowHeight=36)
 
     # Paginación
@@ -507,34 +494,42 @@ def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, 
     else:
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
 
-    # Encabezados “bonitos” / numéricos
-    if 'Valor transferido' in df_display.columns:
-        gb.configure_column('Valor transferido', type=['numericColumn'], headerName="Valor transferido (AR$)")
+    # No marcar 'Valor transferido' como numericColumn porque está formateado como texto.
+    # Si querés ordenar por monto real, podemos agregar una columna oculta con el valor numérico.
 
-    # Renderer para HTML (badge)
-    js_formatter = """
-    function(params){
-        let html = params.value;
-        if (typeof html === 'string' && html.startsWith('<span')) { return html; }
-        return html;
-    }
-    """
-    if 'CUIT listado' in df_display.columns:
-        gb.configure_column('CUIT listado', cellRenderer=js_formatter, cellRendererParams={}, wrapText=True, autoHeight=True)
+    # Renderer JS para HTML (badge) — con JsCode
+    if enable_badge and 'CUIT listado' in df_display.columns:
+        js_formatter = JsCode("""
+            function(params){
+                var html = params.value;
+                if (html && typeof html === 'string' && html.indexOf('<span') === 0) {
+                    return html;
+                }
+                return html;
+            }
+        """)
+        gb.configure_column('CUIT listado', cellRenderer=js_formatter, wrapText=True, autoHeight=True)
 
-    gridOptions = gb.build()
-    gridOptions.setdefault('enableRangeSelection', True)
-    gridOptions.setdefault('clipboardDelimiter', '\t')
+    go = gb.build()
+
+    # Tooltips solo con nombres de campo válidos
+    if 'columnDefs' in go:
+        for cdef in go['columnDefs']:
+            if cdef.get('field') in ('Concepto encontrado', 'Nombre'):
+                cdef['tooltipField'] = cdef['field']
+
+    go.setdefault('enableRangeSelection', True)
+    go.setdefault('clipboardDelimiter', '\t')
 
     AgGrid(
         df_display,
-        gridOptions=gridOptions,
+        gridOptions=go,
         height=height,
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_mode=GridUpdateMode.NO_UPDATE,
-        allow_unsafe_jscode=True,
+        allow_unsafe_jscode=True,   # necesario para JsCode
         theme=theme,
-        key=key,  # <<< CLAVE ÚNICA
+        key=key,                    # clave única SIEMPRE
     )
 
 # =========================
@@ -566,7 +561,7 @@ with tab_cargar:
     with colp3:
         page_choice = st.selectbox("Tamaño de página (tablas)", options=["25","50","75","100","200","All"], index=0, key="page_choice")
         page_size = None if page_choice == "All" else int(page_choice)
-        st.session_state['page_size'] = page_size  # persistimos para otras tabs
+        st.session_state['page_size'] = page_size
 
     st.write("")
     with st.form("procesar_form"):
@@ -785,12 +780,12 @@ with tab_buscar:
 with tab_ajustes:
     st.markdown('### <span class="icon">⚙️</span>Ajustes y ayuda', unsafe_allow_html=True)
     st.markdown("""
-- **Tema de tabla:** la grilla usa **AG Grid / Alpine** con filtros, orden y copy tabulado.
+- **Grilla:** AG Grid (tema *alpine*) con filtros, orden y copia tabulada.
 - **Badges:**  
   - <span class="badge badge-listed">Sí</span> = CUIT presente en Personas  
   - <span class="badge badge-unknown">No</span> = CUIT detectado en Concepto pero **no** listado
 - **Descargas:** CSV con `;` y **BOM** para abrir directo en Excel, o Excel con 2 hojas.
-- **Tips:** si querés un modo oscuro consistente, podemos agregar un `.streamlit/config.toml`.
+- **Tip:** si querés un modo oscuro/clarito fijo, armamos un `.streamlit/config.toml`.
     """, unsafe_allow_html=True)
 
 st.caption(f"Versión de la app: {VERSION}")
