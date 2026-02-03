@@ -5,18 +5,17 @@ import traceback
 import pandas as pd
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 # =========================
 # Config general
 # =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide", page_icon="🔎")
-VERSION = "7.0.0"
+VERSION = "7.1.0"
 
 # ---------- Estilos (CSS ligero) ----------
 CSS = """
 <style>
-/* Tipografía base */
 :root {
   --brand: #1976d2;
   --brand-2: #0d47a1;
@@ -35,11 +34,7 @@ section.main > div { padding-top: 1rem; }
   background: linear-gradient(135deg, rgba(25,118,210,0.08), rgba(25,118,210,0.02) 60%), var(--background);
   border: 1px solid rgba(25,118,210,0.15);
 }
-.hero h1 {
-  margin: 0;
-  font-weight: 800;
-  letter-spacing: -0.01em;
-}
+.hero h1 { margin: 0; font-weight: 800; letter-spacing: -0.01em; }
 .hero .chips { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.25rem }
 .chip {
   display:inline-flex; align-items:center; gap:.4rem;
@@ -106,6 +101,7 @@ for key, default in {
     'search_lote': '',
     'search_kw': '',
     'search_cuit': '',
+    'kpis': {}
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -339,7 +335,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
         else:
             found = found_listed
 
-        # fallback textual
+        # fallback textual por si aparece con separadores en Concepto
         if not found:
             concepto = str(row.get(concepto_col, ''))
             found_raw = set()
@@ -457,12 +453,12 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
 
     res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
-    # KPIs para hero
+    # KPIs (mejor: desde valores numéricos reales)
     kpis = {
         "Movimientos detectados": len(df_detalle_display),
         "CUITs únicos": df_detalle_display['Cuit/Cuil'].nunique() if 'Cuit/Cuil' in df_detalle_display.columns else 0,
-        "Monto total": format_currency_ar(pd.to_numeric(df_detalle_display.get('Valor transferido', pd.Series(dtype=float)).str.replace('.','', regex=False).str.replace(',','.', regex=False), errors='coerce').sum()) if 'Valor transferido' in df_detalle_display.columns else '0,00',
-        "CUITs no listados": df_detalle_display['CUIT listado'].eq('No').sum() if 'CUIT listado' in df_detalle_display.columns else 0
+        "Monto total": format_currency_ar(pd.to_numeric(df_detalle['Valor_num'], errors='coerce').sum()),
+        "CUITs no listados": (df_detalle['CUIT listado'].eq('No')).sum() if 'CUIT listado' in df_detalle.columns else 0
     }
 
     return df_detalle_display.copy(), res_sorted.copy(), kpis
@@ -488,6 +484,58 @@ with st.container():
         """, unsafe_allow_html=True)
 
 st.write("")
+
+# =========================
+# Helper de grilla (con key)
+# =========================
+def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, theme="alpine"):
+    df_display = df.copy()
+
+    # Render de badge para "CUIT listado"
+    if enable_badge and 'CUIT listado' in df_display.columns:
+        df_display['CUIT listado'] = df_display['CUIT listado'].map(
+            lambda v: f'<span class="badge {"badge-listed" if v=="Sí" else "badge-unknown"}">{v}</span>'
+        )
+
+    gb = GridOptionsBuilder.from_dataframe(df_display, enableValue=True, enableRowGroup=True, enablePivot=True)
+    gb.configure_default_column(filterable=True, sortable=True, resizable=True, tooltipField=True)
+    gb.configure_grid_options(domLayout='normal', rowHeight=36)
+
+    # Paginación
+    if page_size is None:
+        gb.configure_grid_options(pagination=False)
+    else:
+        gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
+
+    # Encabezados “bonitos” / numéricos
+    if 'Valor transferido' in df_display.columns:
+        gb.configure_column('Valor transferido', type=['numericColumn'], headerName="Valor transferido (AR$)")
+
+    # Renderer para HTML (badge)
+    js_formatter = """
+    function(params){
+        let html = params.value;
+        if (typeof html === 'string' && html.startsWith('<span')) { return html; }
+        return html;
+    }
+    """
+    if 'CUIT listado' in df_display.columns:
+        gb.configure_column('CUIT listado', cellRenderer=js_formatter, cellRendererParams={}, wrapText=True, autoHeight=True)
+
+    gridOptions = gb.build()
+    gridOptions.setdefault('enableRangeSelection', True)
+    gridOptions.setdefault('clipboardDelimiter', '\t')
+
+    AgGrid(
+        df_display,
+        gridOptions=gridOptions,
+        height=height,
+        data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
+        update_mode=GridUpdateMode.NO_UPDATE,
+        allow_unsafe_jscode=True,
+        theme=theme,
+        key=key,  # <<< CLAVE ÚNICA
+    )
 
 # =========================
 # TABS PRINCIPALES
@@ -516,8 +564,9 @@ with tab_cargar:
     with colp2:
         show_unknown = st.checkbox("Incluir CUITs no listados", value=True, help="Muestra movimientos con CUIT en concepto aunque no estén en Personas.")
     with colp3:
-        page_choice = st.selectbox("Tamaño de página (tablas)", options=["25","50","75","100","200","All"], index=0)
+        page_choice = st.selectbox("Tamaño de página (tablas)", options=["25","50","75","100","200","All"], index=0, key="page_choice")
         page_size = None if page_choice == "All" else int(page_choice)
+        st.session_state['page_size'] = page_size  # persistimos para otras tabs
 
     st.write("")
     with st.form("procesar_form"):
@@ -563,12 +612,13 @@ with tab_cargar:
                 st.info("No se encontraron coincidencias.")
                 st.session_state['df_detalle_display'] = None
                 st.session_state['res_sorted'] = None
+                st.session_state['kpis'] = {}
                 st.session_state['processed'] = False
             else:
                 st.session_state['df_detalle_display'] = df_detalle_display.copy()
                 st.session_state['res_sorted'] = res_sorted.copy()
-                st.session_state['processed'] = True
                 st.session_state['kpis'] = kpis
+                st.session_state['processed'] = True
                 st.success("Listo 🎉 Resultados guardados. Revisá la pestaña **Resultados**.")
 
 with tab_resultados:
@@ -585,65 +635,31 @@ with tab_resultados:
 
         st.write("")
         st.markdown("#### Detalle")
-        def show_aggrid(df, height=420, page_size=25):
-            df_display = df.copy()
-
-            # Badge visual para 'CUIT listado'
-            if 'CUIT listado' in df_display.columns:
-                df_display['CUIT listado'] = df_display['CUIT listado'].map(
-                    lambda v: f'<span class="badge {"badge-listed" if v=="Sí" else "badge-unknown"}">{v}</span>'
-                )
-
-            gb = GridOptionsBuilder.from_dataframe(df_display, enableValue=True, enableRowGroup=True, enablePivot=True)
-            gb.configure_default_column(filterable=True, sortable=True, resizable=True, tooltipField=True)
-            gb.configure_grid_options(domLayout='normal', rowHeight=36)
-            # Paginación
-            if page_size is None:
-                gb.configure_grid_options(pagination=False)
-            else:
-                gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
-
-            # Columnas visibles y formatos
-            if 'Valor transferido' in df_display.columns:
-                gb.configure_column('Valor transferido', type=['numericColumn'], headerName="Valor transferido (AR$)")
-
-            # Formato condicional (resaltar montos altos)
-            js_formatter = """
-            function(params){
-                let html = params.value;
-                if (typeof html === 'string' && html.startsWith('<span')) { return html; }
-                return html;
-            }
-            """
-
-            gb.configure_column('CUIT listado', cellRenderer=js_formatter, cellRendererParams={}, wrapText=True, autoHeight=True)
-            gridOptions = gb.build()
-
-            # Tema Alpine
-            AgGrid(
-                df_display,
-                gridOptions=gridOptions,
-                height=height,
-                data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
-                update_mode=GridUpdateMode.NO_UPDATE,
-                allow_unsafe_jscode=True,
-                theme="alpine"  # 'alpine' | 'balham' | 'material'
-            )
-
-        # Mostrar detalle
         df_det_show = st.session_state['df_detalle_display'].copy()
         det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
         det_cols = [c for c in det_cols if c in df_det_show.columns]
-        show_aggrid(df_det_show[det_cols], height=420, page_size=st.session_state.get('page_size', 25))
+        show_aggrid(
+            df_det_show[det_cols],
+            height=420,
+            page_size=st.session_state.get('page_size', 25),
+            key="grid_detalle_main",
+            enable_badge=True,
+            theme="alpine"
+        )
 
         st.write("")
         st.markdown("#### Resumen")
         res_sorted_df = st.session_state['res_sorted'].copy()
         res_cols = ['Cuit/Cuil','Nombre','Lote','Golf','Suma total']
         res_cols = [c for c in res_cols if c in res_sorted_df.columns]
-
-        # Tabla Resumen
-        show_aggrid(res_sorted_df[res_cols], height=320, page_size=st.session_state.get('page_size', 25))
+        show_aggrid(
+            res_sorted_df[res_cols],
+            height=320,
+            page_size=st.session_state.get('page_size', 25),
+            key="grid_resumen_main",
+            enable_badge=False,
+            theme="alpine"
+        )
 
         # Descargas
         st.write("")
@@ -672,14 +688,15 @@ with tab_resultados:
 
         cdl1, cdl2, cdl3 = st.columns([1.2, 1.2, 1.6])
         with cdl1:
-            st.download_button("⬇️ Detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv", use_container_width=True)
+            st.download_button("⬇️ Detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv", use_container_width=True, key="dl_detalle_csv")
         with cdl2:
-            st.download_button("⬇️ Resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv", use_container_width=True)
+            st.download_button("⬇️ Resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv", use_container_width=True, key="dl_resumen_csv")
         with cdl3:
             st.download_button("⬇️ Excel (Detalle + Resumen)", data=excel_bytes,
                                file_name="resultados.xlsx",
                                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True)
+                               use_container_width=True,
+                               key="dl_excel_xlsx")
         st.markdown('</div>', unsafe_allow_html=True)
 
 with tab_buscar:
@@ -690,7 +707,7 @@ with tab_buscar:
         # Búsqueda por Lote
         with st.expander("🏷️ Buscar por Lote"):
             exact_lote = st.checkbox("Coincidencia exacta", value=False, key="exact_lote")
-            search_lote = st.text_input("Número de lote (ej: 41)", value=st.session_state.get('search_lote',''))
+            search_lote = st.text_input("Número de lote (ej: 41)", value=st.session_state.get('search_lote',''), key="input_lote")
             if search_lote:
                 search_lower = str(search_lote).strip().lower()
                 df_det = st.session_state['df_detalle_display']
@@ -703,11 +720,18 @@ with tab_buscar:
                 if len(matches_det) > 0:
                     det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
                     det_cols = [c for c in det_cols if c in matches_det.columns]
-                    AgGrid(matches_det[det_cols], theme="alpine", height=300)
+                    show_aggrid(
+                        matches_det[det_cols],
+                        height=300,
+                        page_size=st.session_state.get('page_size', 25),
+                        key=f"grid_busq_lote_{search_lower}_{int(exact_lote)}",
+                        enable_badge=True,
+                        theme="alpine"
+                    )
 
         # Búsqueda por palabra clave
         with st.expander("🧠 Buscar por palabra clave (Concepto / Nombre)", expanded=True):
-            search_kw = st.text_input("Palabra clave", value=st.session_state.get('search_kw',''))
+            search_kw = st.text_input("Palabra clave", value=st.session_state.get('search_kw',''), key="input_kw")
             if search_kw:
                 kw_lower = str(search_kw).strip().lower()
                 df_det = st.session_state['df_detalle_display'].copy()
@@ -720,13 +744,20 @@ with tab_buscar:
                 if len(matches_det_kw) > 0:
                     det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
                     det_cols = [c for c in det_cols if c in matches_det_kw.columns]
-                    AgGrid(matches_det_kw[det_cols], theme="alpine", height=300)
+                    show_aggrid(
+                        matches_det_kw[det_cols],
+                        height=300,
+                        page_size=st.session_state.get('page_size', 25),
+                        key=f"grid_busq_kw_{kw_lower}",
+                        enable_badge=True,
+                        theme="alpine"
+                    )
 
         # Búsqueda por CUIT/CUIL
         with st.expander("🆔 Buscar por CUIT/CUIL", expanded=True):
             col_cuit_a, col_cuit_b = st.columns([2, 1])
             with col_cuit_a:
-                search_cuit = st.text_input("Ingresá CUIT/CUIL (con o sin separadores)", value=st.session_state.get('search_cuit',''))
+                search_cuit = st.text_input("Ingresá CUIT/CUIL (con o sin separadores)", value=st.session_state.get('search_cuit',''), key="input_cuit")
             with col_cuit_b:
                 exact_cuit = st.checkbox("Coincidencia exacta", value=True, key="exact_cuit")
             if search_cuit:
@@ -742,7 +773,14 @@ with tab_buscar:
                     if len(matches_det_cuit) > 0:
                         det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
                         det_cols = [c for c in det_cols if c in matches_det_cuit.columns]
-                        AgGrid(matches_det_cuit[det_cols], theme="alpine", height=300)
+                        show_aggrid(
+                            matches_det_cuit[det_cols],
+                            height=300,
+                            page_size=st.session_state.get('page_size', 25),
+                            key=f"grid_busq_cuit_{q_digits}_{int(exact_cuit)}",
+                            enable_badge=True,
+                            theme="alpine"
+                        )
 
 with tab_ajustes:
     st.markdown('### <span class="icon">⚙️</span>Ajustes y ayuda', unsafe_allow_html=True)
@@ -752,8 +790,7 @@ with tab_ajustes:
   - <span class="badge badge-listed">Sí</span> = CUIT presente en Personas  
   - <span class="badge badge-unknown">No</span> = CUIT detectado en Concepto pero **no** listado
 - **Descargas:** CSV con `;` y **BOM** para abrir directo en Excel, o Excel con 2 hojas.
-- **Sugerencias:** si querés modo oscuro/clarito consistente, agregamos un `config.toml`.
+- **Tips:** si querés un modo oscuro consistente, podemos agregar un `.streamlit/config.toml`.
     """, unsafe_allow_html=True)
 
 st.caption(f"Versión de la app: {VERSION}")
-
