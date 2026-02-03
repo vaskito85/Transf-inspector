@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 # Config general
 # =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "6.0.0"
+VERSION = "6.1.0"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -140,7 +140,7 @@ def unique_join(values):
     seen, result = set(), []
     for v in values:
         vv = (str(v) if v is not None else '').strip()
-        if vv and vv not in seen:
+        if vv and vv.lower() not in ('nan', 'none') and vv not in seen:
             seen.add(vv); result.append(vv)
     return " / ".join(result)
 
@@ -175,7 +175,7 @@ def find_col(df: pd.DataFrame, keywords):
 # ---------- Parseo robusto de importes ----------
 def parse_money_ar(s: str):
     """
-    Normaliza y parsea importes: 1.234,56 | 1,234.56 | 1234,56 | 1234.56 | (1.234,56)
+    Normaliza y parsea importes: 1.234,56 | 1,234.56 | 1234,56 | 1234.56 | (1.234,56) | $ 1.234,56
     Devuelve float o NaN si no parsea.
     """
     if s is None:
@@ -219,6 +219,32 @@ def parse_money_ar(s: str):
     except Exception:
         return float('nan')
 
+# ---------- Créditos partidos (plan B) ----------
+def get_credit_value_from_row(row: pd.Series, credito_col: str, df_cols: list, max_look_ahead: int = 2):
+    """
+    Toma el valor de 'Crédito'; si es simbólico ('$', '-', vacío), busca en hasta 2 columnas contiguas a la derecha.
+    """
+    def looks_symbolic(x: str) -> bool:
+        s = str(x).strip()
+        return (s == '' or s in ('$', '-', '$-', '-$') or re.fullmatch(r'[\$\-\s]+', s) is not None)
+
+    # valor en la columna detectada
+    val = row.get(credito_col, '')
+    if not looks_symbolic(val) and re.search(r'\d', str(val)):
+        return val
+
+    # buscar a la derecha (1..max_look_ahead)
+    try:
+        j = df_cols.index(credito_col)
+        for k in range(1, max_look_ahead + 1):
+            if j + k < len(df_cols):
+                vnext = row.get(df_cols[j + k], '')
+                if not looks_symbolic(vnext) and re.search(r'\d', str(vnext)):
+                    return vnext
+    except Exception:
+        pass
+    return val  # devolvemos lo original si no encontramos mejor
+
 # ---------- Validación CUIT ----------
 CUIT_LEN = 11
 
@@ -235,7 +261,11 @@ def cuit_is_valid(cuit_digits: str) -> bool:
 def extract_digit_runs(s):
     return re.findall(r'\d{7,}', s or '')  # ignorar runs cortas para optimizar
 
-def find_cuits_in_text(concepto_digits: str, cuit_set: set):
+def find_cuits_in_text(concepto_digits: str):
+    """
+    Devuelve todos los substrings de 11 dígitos presentes en corridas numéricas del concepto.
+    No valida; la validación (si corresponde) se aplica afuera.
+    """
     found = set()
     if not concepto_digits:
         return found
@@ -244,8 +274,7 @@ def find_cuits_in_text(concepto_digits: str, cuit_set: set):
             continue
         for i in range(len(run) - CUIT_LEN + 1):
             sub = run[i:i+CUIT_LEN]
-            if sub in cuit_set:
-                found.add(sub)
+            found.add(sub)
     return found
 
 # =========================
@@ -258,13 +287,13 @@ def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
     buf = io.BytesIO(buf_bytes)
     try:
         if ext_hint and ext_hint.lower() == "xls":
-            # xlrd para .xls (si está disponible)
+            # xlrd para .xls (si está disponible en el entorno)
             return pd.read_excel(buf, dtype=str, engine="xlrd").fillna('')
         else:
             # openpyxl para .xlsx
             return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
     except Exception:
-        # Fallback: que Pandas decida engine
+        # Fallback: que Pandas decida engine si no están instalados los recomendados
         buf.seek(0)
         return pd.read_excel(buf, dtype=str).fillna('')
 
@@ -272,7 +301,7 @@ def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
 # Procesamiento principal
 # =========================
 @st.cache_data(show_spinner=False)
-def process_files(personas_bytes, banco_bytes, personas_name, banco_name, validate_cuit=True):
+def process_files(personas_bytes, banco_bytes, personas_name, banco_name, validate_cuit=True, show_unknown=False):
     # ---- leer
     personas = read_excel_bytes_from_buffer(
         personas_bytes,
@@ -303,37 +332,55 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
     personas = personas.copy()
     banco = banco.copy()
 
-    # ---- normalizaciones
+    # ---- normalizaciones personas
     personas['cuit_raw'] = personas[cuit_col].astype(str).str.strip()
     personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
 
-    # filtrar cuits válidos si corresponde
     cuit_list = [c for c in personas['cuit_digits'].dropna().unique().tolist() if c]
     if validate_cuit:
         cuit_list = [c for c in cuit_list if cuit_is_valid(c)]
-    if len(cuit_list) == 0:
-        return pd.DataFrame(), pd.DataFrame()
-
     cuit_set = set(cuit_list)
 
+    # si no hay ningún CUIT en personas y show_unknown es False, no habrá resultados
+    # con show_unknown=True sí puede haber (a partir del banco).
+    if len(cuit_list) == 0 and not show_unknown:
+        return pd.DataFrame(), pd.DataFrame()
+
+    # ---- normalizaciones banco
     banco['Concepto_str'] = banco[concepto_col].astype(str)
     banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
 
-    # ---- encontrar filas con al menos un CUIT (matcher eficiente)
+    # ---- escanear movimientos y capturar cuits encontrados
     matches_idx = []
-    found_map = {}  # idx banco -> set(cuits)
+    found_map = {}  # idx banco -> set(cuits_encontrados)
     for idx, row in banco.iterrows():
         concepto_digits = row['Concepto_digits']
-        found = find_cuits_in_text(concepto_digits, cuit_set)
+        # 1) todos los substrings de 11 dígitos en el concepto
+        found_all = find_cuits_in_text(concepto_digits)
+
+        # 2) si validar dígito: filtrar los que no cumplan
+        if validate_cuit:
+            found_all = {c for c in found_all if cuit_is_valid(c)}
+
+        # 3) aplicar política según show_unknown:
+        #    - False: solo cuits listados en Personas
+        #    - True: todos los encontrados (listados y no listados)
+        if show_unknown:
+            found = set(found_all)
+        else:
+            found = set(found_all) & cuit_set
+
+        # 4) fallback textual si no encontró nada por dígitos:
         if not found:
-            # fallback: a veces el concepto incluye el CUIT con separadores o en crudo no 100% numérico
-            # intentamos búsquedas "raw" por coincidencia textual de cuit_raws
             concepto = str(row.get(concepto_col, ''))
             found_raw = set()
             for c_raw in personas['cuit_raw'].dropna().unique():
                 if c_raw and c_raw.strip() and c_raw.lower() in concepto.lower():
-                    found_raw.add(only_digits(c_raw))
+                    cd = only_digits(c_raw)
+                    if (not validate_cuit) or cuit_is_valid(cd):
+                        found_raw.add(cd)
             found = found or found_raw
+
         if found:
             matches_idx.append(idx)
             found_map[idx] = found
@@ -342,6 +389,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
         return pd.DataFrame(), pd.DataFrame()
 
     matches = banco.loc[matches_idx].copy()
+    banco_cols = list(banco.columns)
 
     # ---- construir detalle
     resultados = []
@@ -350,31 +398,26 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
         fecha_val = m.get(fecha_col, '') if fecha_col else ''
         fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
 
-        # valor (tomamos "Crédito"/importe hallado en credito_col)
-        credito_val = m.get(credito_col, m.get('Credito', ''))
+        # valor (tomamos "Crédito" con plan B a derecha si está partido)
+        credito_val = get_credit_value_from_row(m, credito_col, banco_cols, max_look_ahead=2)
         credito_num = parse_money_ar(credito_val)
 
         for f in found_map.get(idx, []):
+            # Buscar datos en Personas (si no está, quedarán vacíos)
             p = personas[personas['cuit_digits'] == f]
             if p.empty:
                 nombre = ''
                 lote = ''
                 golf = ''
-                cuit_display = f
+                cuit_display = f  # para desconocidos, mostramos los 11 dígitos
             else:
-                nombres_unique = []
-                lotes_unique = []
-                golfs_unique = []
-                if nombre_col:
-                    nombres_unique = [n for n in pd.unique(p[nombre_col].astype(str).str.strip()) if n and n.lower() not in ('nan', 'none')]
-                if lote_col:
-                    lotes_unique = [l for l in pd.unique(p[lote_col].astype(str).str.strip()) if l and l.lower() not in ('nan', 'none')]
-                if golf_col:
-                    golfs_unique = [g for g in pd.unique(p[golf_col].astype(str).str.strip()) if g and g.lower() not in ('nan', 'none')]
+                nombres_unique = [n for n in pd.unique(p[nombre_col].astype(str).str.strip())] if nombre_col else []
+                lotes_unique = [l for l in pd.unique(p[lote_col].astype(str).str.strip())] if lote_col else []
+                golfs_unique = [g for g in pd.unique(p[golf_col].astype(str).str.strip())] if golf_col else []
 
-                nombre = " / ".join(nombres_unique)
-                lote   = " / ".join(lotes_unique)
-                golf   = " / ".join(golfs_unique)
+                nombre = unique_join(nombres_unique)
+                lote   = unique_join(lotes_unique)
+                golf   = unique_join(golfs_unique)
 
                 cuit_raws = p['cuit_raw'].astype(str).str.strip()
                 cuit_display = (pd.unique(cuit_raws)[0] if len(pd.unique(cuit_raws)) > 0 else f)
@@ -489,13 +532,15 @@ st.write(" ")
 # Parámetros de procesamiento
 # =========================
 st.markdown("### Parámetros")
-colp1, colp2, colp3 = st.columns([1.3, 1.2, 2])
+colp1, colp2, colp3, colp4 = st.columns([1.6, 1.4, 1.6, 2.4])
 with colp1:
     validate_cuit = st.checkbox("Validar dígito de CUIT", value=True, help="Reduce falsos positivos en textos con números largos.")
 with colp2:
+    show_unknown = st.checkbox("Incluir CUITs no listados", value=True, help="Muestra movimientos con CUIT en concepto aunque no estén en Personas.")
+with colp3:
     page_choice = st.selectbox("Tamaño de página", options=["25","50","75","100","200","All"], index=0)
     page_size = None if page_choice == "All" else int(page_choice)
-with colp3:
+with colp4:
     exact_lote = st.checkbox("Búsqueda de Lote exacta", value=False)
 
 # =========================
@@ -515,7 +560,8 @@ with st.form("procesar_form"):
                 st.session_state['uploaded_banco_bytes'],
                 st.session_state.get('uploaded_personas_name',''),
                 st.session_state.get('uploaded_banco_name',''),
-                validate_cuit=validate_cuit
+                validate_cuit=validate_cuit,
+                show_unknown=show_unknown
             )
         except Exception as e:
             st.error(f"Error en procesamiento: {e}")
@@ -671,4 +717,5 @@ if search_lote and st.session_state.get('df_detalle_display') is not None:
         st.info("No se encontraron filas en el resumen para ese lote.")
 
 st.caption(f"Versión de la app: {VERSION}")
+
 
