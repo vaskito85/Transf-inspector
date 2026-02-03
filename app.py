@@ -11,7 +11,7 @@ from PIL import Image, ImageDraw
 # Config general
 # =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "6.1.0"
+VERSION = "6.2.0"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -42,6 +42,8 @@ for key, default in {
     'res_sorted': None,
     'processed': False,
     'search_lote': '',
+    'search_kw': '',
+    'search_cuit': '',
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
@@ -341,8 +343,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
         cuit_list = [c for c in cuit_list if cuit_is_valid(c)]
     cuit_set = set(cuit_list)
 
-    # si no hay ningún CUIT en personas y show_unknown es False, no habrá resultados
-    # con show_unknown=True sí puede haber (a partir del banco).
+    # si no hay CUIT en personas y show_unknown es False, no habrá resultados
     if len(cuit_list) == 0 and not show_unknown:
         return pd.DataFrame(), pd.DataFrame()
 
@@ -363,12 +364,10 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
             found_all = {c for c in found_all if cuit_is_valid(c)}
 
         # 3) aplicar política según show_unknown:
-        #    - False: solo cuits listados en Personas
-        #    - True: todos los encontrados (listados y no listados)
         if show_unknown:
-            found = set(found_all)
+            found = set(found_all)  # incluye también no listados
         else:
-            found = set(found_all) & cuit_set
+            found = set(found_all) & cuit_set  # solo listados
 
         # 4) fallback textual si no encontró nada por dígitos:
         if not found:
@@ -676,7 +675,7 @@ if st.session_state.get('res_sorted') is not None:
                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 
 # =========================
-# Buscador por Lote
+# Buscadores
 # =========================
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
@@ -716,6 +715,80 @@ if search_lote and st.session_state.get('df_detalle_display') is not None:
     else:
         st.info("No se encontraron filas en el resumen para ese lote.")
 
-st.caption(f"Versión de la app: {VERSION}")
+# ---------- Buscar por palabra clave ----------
+st.markdown("---")
+st.subheader("Buscar por palabra clave (Concepto/Nombre)")
+search_kw = st.text_input("Ingresá una palabra clave (busca en 'Concepto encontrado' y 'Nombre')", value=st.session_state.get('search_kw',''), key="search_kw")
 
+if search_kw and st.session_state.get('df_detalle_display') is not None:
+    kw_lower = str(search_kw).strip().lower()
+    df_det = st.session_state['df_detalle_display'].copy()
+
+    mask_kw = (
+        df_det['Concepto encontrado'].astype(str).str.lower().str.contains(kw_lower, na=False) |
+        df_det['Nombre'].astype(str).str.lower().str.contains(kw_lower, na=False)
+    )
+    matches_det_kw = df_det.loc[mask_kw].copy()
+    count_det_kw = len(matches_det_kw)
+    st.write(f"Coincidencias en detalle (keyword): **{count_det_kw}**")
+
+    if count_det_kw > 0:
+        cols_det = ['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
+        cols_det = [c for c in cols_det if c in matches_det_kw.columns]
+        show_aggrid(matches_det_kw[cols_det], height=300, page_size=page_size)
+    else:
+        st.info("No se encontraron filas en el detalle para esa palabra clave.")
+
+# ---------- Buscar por CUIT/CUIL ----------
+st.markdown("---")
+st.subheader("Buscar por CUIT/CUIL")
+col_cuit_a, col_cuit_b = st.columns([2, 1])
+with col_cuit_a:
+    search_cuit = st.text_input("Ingresá CUIT/CUIL (con o sin separadores)", value=st.session_state.get('search_cuit',''), key="search_cuit")
+with col_cuit_b:
+    exact_cuit = st.checkbox("Coincidencia exacta", value=True)
+
+if search_cuit and st.session_state.get('df_detalle_display') is not None:
+    q_digits = only_digits(search_cuit)
+    if q_digits == '':
+        st.warning("Ingresá al menos un dígito.")
+    else:
+        df_det = st.session_state['df_detalle_display'].copy()
+        det_cuit_digits = df_det['Cuit/Cuil'].astype(str).apply(only_digits)
+
+        if exact_cuit:
+            mask_det_cuit = det_cuit_digits == q_digits
+        else:
+            mask_det_cuit = det_cuit_digits.str.contains(q_digits, na=False)
+
+        matches_det_cuit = df_det.loc[mask_det_cuit].copy()
+        count_det_cuit = len(matches_det_cuit)
+
+        res_sorted = st.session_state['res_sorted'].copy()
+        res_cuit_digits = res_sorted['Cuit/Cuil'].astype(str).apply(only_digits)
+        if exact_cuit:
+            mask_res_cuit = res_cuit_digits == q_digits
+        else:
+            mask_res_cuit = res_cuit_digits.str.contains(q_digits, na=False)
+
+        matches_res_cuit = res_sorted.loc[mask_res_cuit].copy()
+        count_res_cuit = len(matches_res_cuit)
+
+        st.write(f"Coincidencias en detalle: **{count_det_cuit}** — Coincidencias en resumen: **{count_res_cuit}**")
+
+        if count_det_cuit > 0:
+            cols_det = ['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
+            cols_det = [c for c in cols_det if c in matches_det_cuit.columns]
+            show_aggrid(matches_det_cuit[cols_det], height=300, page_size=page_size)
+        else:
+            st.info("No se encontraron filas en el detalle para ese CUIT/CUIL.")
+
+        if count_res_cuit > 0:
+            cols_res = ['Cuit/Cuil','Nombre','Lote','Golf','Suma total']
+            cols_res = [c for c in cols_res if c in matches_res_cuit.columns]
+            show_aggrid(matches_res_cuit[cols_res], height=250, page_size=page_size)
+        else:
+            st.info("No se encontraron filas en el resumen para ese CUIT/CUIL.")
+
+st.caption(f"Versión de la app: {VERSION}")
 
