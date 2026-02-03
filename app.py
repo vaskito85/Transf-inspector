@@ -1,13 +1,17 @@
 import io
 import re
+import math
 import traceback
 import pandas as pd
 import streamlit as st
 from st_aggrid import AgGrid, GridOptionsBuilder, DataReturnMode, GridUpdateMode
 from PIL import Image, ImageDraw
 
+# =========================
+# Config general
+# =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide")
-VERSION = "5.6.5"
+VERSION = "6.0.0"
 
 # ---------- pequeño logo a la izquierda del título ----------
 def make_logo(size=48, bg_color=(255, 255, 255, 0), circle_color=(25, 118, 210, 255)):
@@ -26,7 +30,9 @@ with col_title:
     st.title("Buscador CUIT - Movimientos")
 st.caption(f"Versión de la app: {VERSION}")
 
-# ---------- inicializar session_state ----------
+# =========================
+# Session state inicial
+# =========================
 for key, default in {
     'uploaded_personas_bytes': None,
     'uploaded_banco_bytes': None,
@@ -35,21 +41,16 @@ for key, default in {
     'df_detalle_display': None,
     'res_sorted': None,
     'processed': False,
-    'search_lote': ''
+    'search_lote': '',
 }.items():
     if key not in st.session_state:
         st.session_state[key] = default
 
-# ---------- utilidades ----------
-def find_col(df, keywords):
-    for k in keywords:
-        for c in df.columns:
-            if k.lower() in str(c).lower():
-                return c
-    return None
-
+# =========================
+# Utilidades
+# =========================
 def only_digits(s):
-    return re.sub(r'\D', '', str(s))
+    return re.sub(r'\D', '', str(s) if s is not None else '')
 
 def format_currency_ar(value):
     try:
@@ -80,17 +81,14 @@ def safe_int_like_to_str(v):
                 return str(int(v))
         except Exception:
             pass
-        try:
-            if hasattr(v, 'item'):
-                vv = v.item()
-                if isinstance(vv, int) and not isinstance(vv, bool):
-                    return str(vv)
-                if isinstance(vv, float):
-                    if float(vv).is_integer():
-                        return str(int(vv))
-                    return str(vv)
-        except Exception:
-            pass
+        if hasattr(v, 'item'):
+            vv = v.item()
+            if isinstance(vv, int) and not isinstance(vv, bool):
+                return str(vv)
+            if isinstance(vv, float):
+                if float(vv).is_integer():
+                    return str(int(vv))
+                return str(vv)
         if isinstance(v, float):
             if float(v).is_integer():
                 return str(int(v))
@@ -138,67 +136,225 @@ def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
     except Exception:
         return s
 
-# ---------- lectura segura de Excel ----------
+def unique_join(values):
+    seen, result = set(), []
+    for v in values:
+        vv = (str(v) if v is not None else '').strip()
+        if vv and vv not in seen:
+            seen.add(vv); result.append(vv)
+    return " / ".join(result)
+
+# ---------- Detección de columnas mejorada ----------
+def find_col(df: pd.DataFrame, keywords):
+    """
+    Busca columnas dando prioridad a:
+    1) match exacto
+    2) empieza con
+    3) contiene
+    """
+    cols = [str(c) for c in df.columns]
+    kl = [k.lower() for k in keywords]
+
+    # exact
+    for k in kl:
+        for c in cols:
+            if c.lower() == k:
+                return c
+    # startswith
+    for k in kl:
+        for c in cols:
+            if c.lower().startswith(k):
+                return c
+    # contains
+    for k in kl:
+        for c in cols:
+            if k in c.lower():
+                return c
+    return None
+
+# ---------- Parseo robusto de importes ----------
+def parse_money_ar(s: str):
+    """
+    Normaliza y parsea importes: 1.234,56 | 1,234.56 | 1234,56 | 1234.56 | (1.234,56)
+    Devuelve float o NaN si no parsea.
+    """
+    if s is None:
+        return float('nan')
+    if isinstance(s, (int, float)):
+        try:
+            return float(s)
+        except Exception:
+            return float('nan')
+
+    s = str(s).strip()
+    if s == '':
+        return float('nan')
+
+    # eliminar símbolos no numéricos comunes (menos signos, comas, puntos, paréntesis)
+    s = re.sub(r'[^\d,.\-\(\)]', '', s)
+
+    neg = False
+    if s.startswith('(') and s.endswith(')'):
+        neg = True
+        s = s[1:-1]
+
+    last_comma = s.rfind(',')
+    last_dot   = s.rfind('.')
+
+    if last_comma == -1 and last_dot == -1:
+        # no separador decimal: sacar posibles miles
+        s_clean = re.sub(r'[,.]', '', s)
+    else:
+        dec = ',' if last_comma > last_dot else '.'
+        idx = last_comma if dec == ',' else last_dot
+        int_part = re.sub(r'[.,]', '', s[:idx])
+        dec_part = s[idx+1:]
+        s_clean = f"{int_part}.{dec_part}"
+
+    try:
+        val = float(s_clean)
+        if neg:
+            val = -val
+        return val
+    except Exception:
+        return float('nan')
+
+# ---------- Validación CUIT ----------
+CUIT_LEN = 11
+
+def cuit_is_valid(cuit_digits: str) -> bool:
+    if not re.fullmatch(r'\d{11}', cuit_digits or ''):
+        return False
+    digits = list(map(int, cuit_digits))
+    factors = [5,4,3,2,7,6,5,4,3,2]
+    s = sum(d * f for d, f in zip(digits[:10], factors))
+    mod = 11 - (s % 11)
+    check = 0 if mod == 11 else (9 if mod == 10 else mod)
+    return check == digits[10]
+
+def extract_digit_runs(s):
+    return re.findall(r'\d{7,}', s or '')  # ignorar runs cortas para optimizar
+
+def find_cuits_in_text(concepto_digits: str, cuit_set: set):
+    found = set()
+    if not concepto_digits:
+        return found
+    for run in extract_digit_runs(concepto_digits):
+        if len(run) < CUIT_LEN:
+            continue
+        for i in range(len(run) - CUIT_LEN + 1):
+            sub = run[i:i+CUIT_LEN]
+            if sub in cuit_set:
+                found.add(sub)
+    return found
+
+# =========================
+# Lectura segura de Excel
+# =========================
 @st.cache_data
 def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
+    if not buf_bytes:
+        raise ValueError("Archivo vacío o no cargado.")
     buf = io.BytesIO(buf_bytes)
     try:
         if ext_hint and ext_hint.lower() == "xls":
-            return pd.read_excel(buf, dtype=str).fillna('')
+            # xlrd para .xls (si está disponible)
+            return pd.read_excel(buf, dtype=str, engine="xlrd").fillna('')
         else:
+            # openpyxl para .xlsx
             return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
     except Exception:
+        # Fallback: que Pandas decida engine
         buf.seek(0)
         return pd.read_excel(buf, dtype=str).fillna('')
 
-# ---------- procesamiento principal ----------
-@st.cache_data
-def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
-    personas = read_excel_bytes_from_buffer(personas_bytes, ext_hint=(personas_name.split('.')[-1] if personas_name else None))
-    banco = read_excel_bytes_from_buffer(banco_bytes, ext_hint=(banco_name.split('.')[-1] if banco_name else None))
+# =========================
+# Procesamiento principal
+# =========================
+@st.cache_data(show_spinner=False)
+def process_files(personas_bytes, banco_bytes, personas_name, banco_name, validate_cuit=True):
+    # ---- leer
+    personas = read_excel_bytes_from_buffer(
+        personas_bytes,
+        ext_hint=(personas_name.split('.')[-1] if personas_name else None)
+    )
+    banco = read_excel_bytes_from_buffer(
+        banco_bytes,
+        ext_hint=(banco_name.split('.')[-1] if banco_name else None)
+    )
 
+    # ---- detectar columnas banco
     concepto_col = find_col(banco, ['concepto', 'concept'])
-    credito_col = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
-    fecha_col = find_col(banco, ['fecha', 'date', 'fecha de'])
+    credito_col  = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
+    fecha_col    = find_col(banco, ['fecha', 'date', 'fecha de'])
     if not concepto_col:
-        raise ValueError("No se encontró la columna 'Concepto' en el archivo bancario.")
-    cuit_col = find_col(personas, ['cuit', 'cuil'])
+        raise ValueError("No se encontró la columna de Concepto en el archivo bancario.")
+    if not credito_col:
+        raise ValueError("No se encontró columna de Crédito/Importe/Monto en el archivo bancario.")
+
+    # ---- detectar columnas personas
+    cuit_col   = find_col(personas, ['cuit', 'cuil'])
     nombre_col = find_col(personas, ['nombre', 'name'])
-    lote_col = find_col(personas, ['lote'])
-    golf_col = find_col(personas, ['golf'])
+    lote_col   = find_col(personas, ['lote'])
+    golf_col   = find_col(personas, ['golf'])
     if not cuit_col:
-        raise ValueError("No se encontró la columna 'Cuit/Cuil' en el archivo de personas.")
+        raise ValueError("No se encontró la columna de Cuit/Cuil en el archivo de personas.")
 
     personas = personas.copy()
     banco = banco.copy()
 
+    # ---- normalizaciones
     personas['cuit_raw'] = personas[cuit_col].astype(str).str.strip()
     personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
-    banco['Concepto_str'] = banco[concepto_col].astype(str)
-    banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
 
-    cuit_list = personas['cuit_digits'].dropna().unique().tolist()
+    # filtrar cuits válidos si corresponde
+    cuit_list = [c for c in personas['cuit_digits'].dropna().unique().tolist() if c]
+    if validate_cuit:
+        cuit_list = [c for c in cuit_list if cuit_is_valid(c)]
     if len(cuit_list) == 0:
         return pd.DataFrame(), pd.DataFrame()
 
-    escaped = [re.escape(x) for x in cuit_list if x != '']
-    pattern = '|'.join(escaped)
-    mask_any = banco['Concepto_digits'].str.contains(pattern, na=False, regex=True)
-    matches = banco[mask_any].copy()
+    cuit_set = set(cuit_list)
 
-    resultados = []
-    for _, m in matches.iterrows():
-        concepto = str(m.get(concepto_col, ''))
-        concepto_digits = re.sub(r'\D', '', concepto)
-        found = set()
-        for c in escaped:
-            if re.search(c, concepto_digits):
-                found.add(re.sub(r'\\', '', c))
+    banco['Concepto_str'] = banco[concepto_col].astype(str)
+    banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
+
+    # ---- encontrar filas con al menos un CUIT (matcher eficiente)
+    matches_idx = []
+    found_map = {}  # idx banco -> set(cuits)
+    for idx, row in banco.iterrows():
+        concepto_digits = row['Concepto_digits']
+        found = find_cuits_in_text(concepto_digits, cuit_set)
         if not found:
+            # fallback: a veces el concepto incluye el CUIT con separadores o en crudo no 100% numérico
+            # intentamos búsquedas "raw" por coincidencia textual de cuit_raws
+            concepto = str(row.get(concepto_col, ''))
+            found_raw = set()
             for c_raw in personas['cuit_raw'].dropna().unique():
-                if c_raw and c_raw.lower() in concepto.lower():
-                    found.add(only_digits(c_raw))
-        for f in found:
+                if c_raw and c_raw.strip() and c_raw.lower() in concepto.lower():
+                    found_raw.add(only_digits(c_raw))
+            found = found or found_raw
+        if found:
+            matches_idx.append(idx)
+            found_map[idx] = found
+
+    if not matches_idx:
+        return pd.DataFrame(), pd.DataFrame()
+
+    matches = banco.loc[matches_idx].copy()
+
+    # ---- construir detalle
+    resultados = []
+    for idx, m in matches.iterrows():
+        concepto = str(m.get(concepto_col, ''))
+        fecha_val = m.get(fecha_col, '') if fecha_col else ''
+        fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
+
+        # valor (tomamos "Crédito"/importe hallado en credito_col)
+        credito_val = m.get(credito_col, m.get('Credito', ''))
+        credito_num = parse_money_ar(credito_val)
+
+        for f in found_map.get(idx, []):
             p = personas[personas['cuit_digits'] == f]
             if p.empty:
                 nombre = ''
@@ -206,32 +362,22 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
                 golf = ''
                 cuit_display = f
             else:
-                # Concatenar todos los valores asociados al CUIT (visualización)
-                nombres = p[nombre_col].astype(str).str.strip().replace('nan','').replace('None','') if nombre_col else pd.Series([])
-                nombres_unique = [n for n in pd.unique(nombres) if n]
+                nombres_unique = []
+                lotes_unique = []
+                golfs_unique = []
+                if nombre_col:
+                    nombres_unique = [n for n in pd.unique(p[nombre_col].astype(str).str.strip()) if n and n.lower() not in ('nan', 'none')]
+                if lote_col:
+                    lotes_unique = [l for l in pd.unique(p[lote_col].astype(str).str.strip()) if l and l.lower() not in ('nan', 'none')]
+                if golf_col:
+                    golfs_unique = [g for g in pd.unique(p[golf_col].astype(str).str.strip()) if g and g.lower() not in ('nan', 'none')]
+
                 nombre = " / ".join(nombres_unique)
+                lote   = " / ".join(lotes_unique)
+                golf   = " / ".join(golfs_unique)
 
-                lotes = p[lote_col].astype(str).str.strip().replace('nan','').replace('None','') if lote_col else pd.Series([])
-                lotes_unique = [l for l in pd.unique(lotes) if l]
-                lote = " / ".join(lotes_unique)
-
-                golfs = p[golf_col].astype(str).str.strip().replace('nan','').replace('None','') if golf_col else pd.Series([])
-                golfs_unique = [g for g in pd.unique(golfs) if g]
-                golf = " / ".join(golfs_unique)
-
-                cuit_raws = p['cuit_raw'].astype(str).str.strip().replace('nan','').replace('None','')
+                cuit_raws = p['cuit_raw'].astype(str).str.strip()
                 cuit_display = (pd.unique(cuit_raws)[0] if len(pd.unique(cuit_raws)) > 0 else f)
-
-            credito_val = m.get(credito_col, m.get('Credito','')) if credito_col else m.get('Credito','')
-            credito_str = str(credito_val).strip()
-            credito_str = re.sub(r'[^\d,.\-]', '', credito_str)
-            if credito_str.count(',') == 1 and credito_str.count('.') == 0:
-                credito_norm = credito_str.replace('.', '').replace(',', '.')
-            else:
-                credito_norm = credito_str.replace(',', '')
-            credito_num = pd.to_numeric(credito_norm, errors='coerce')
-            fecha_val = m.get(fecha_col, '') if fecha_col else ''
-            fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
 
             resultados.append({
                 'Fecha': fecha_dt,
@@ -248,21 +394,22 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     if df_detalle.empty:
         return pd.DataFrame(), pd.DataFrame()
 
-    # trabajar sobre copia para evitar SettingWithCopyWarning
+    # ---- orden/formatos detalle
     df_detalle = df_detalle.copy()
     df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], dayfirst=True, errors='coerce')
     df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
     df_detalle['Fecha_str'] = df_detalle['Fecha'].dt.strftime('%Y-%m-%d').fillna('')
     df_detalle['Valor_formateado'] = df_detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
 
-    # Mantener columnas raw para agrupación/búsqueda y numéricas separadas para ordenamiento
     for _col in ['Lote', 'Golf']:
         if _col in df_detalle.columns:
             df_detalle[f"{_col}_raw"] = df_detalle[_col].astype(str).replace('nan', '').replace('None', '')
             df_detalle[f"{_col}_num"] = pd.to_numeric(df_detalle[_col].replace('', pd.NA), errors='coerce')
 
-    # Preparar df_detalle_display
-    df_detalle_display = df_detalle[['Fecha_str','Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Lote_num','Golf_num','Valor_formateado','Concepto encontrado']].copy()
+    # ---- df_detalle_display
+    cols_base = ['Fecha_str','Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Lote_num','Golf_num','Valor_formateado','Concepto encontrado']
+    cols_base = [c for c in cols_base if c in df_detalle.columns]
+    df_detalle_display = df_detalle[cols_base].copy()
     df_detalle_display = df_detalle_display.rename(columns={
         'Fecha_str': 'Fecha',
         'Lote_raw': 'Lote',
@@ -270,19 +417,19 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
         'Valor_formateado': 'Valor transferido'
     })
 
-    # ---------- NUEVO: resumen suma por CUIT/Lote/Golf (independiente del nombre) ----------
+    # ---- resumen por CUIT/Lote/Golf
     df_resumen = df_detalle.copy()
     df_resumen['Valor_num'] = pd.to_numeric(df_resumen['Valor_num'], errors='coerce').fillna(0)
 
-    # Concatenar todos los nombres asociados a cada CUIT para mostrar en el resumen
-    nombres_map = df_resumen.groupby('Cuit/Cuil')['Nombre'].apply(lambda x: " / ".join(pd.unique(x))).to_dict()
+    # nombres concatenados por CUIT
+    nombres_map = df_resumen.groupby('Cuit/Cuil')['Nombre'].apply(lambda x: unique_join(x)).to_dict()
 
     resumen = df_resumen.groupby(['Cuit/Cuil','Lote_raw','Golf_raw'], as_index=False)['Valor_num'].sum()
     resumen['Nombre'] = resumen['Cuit/Cuil'].map(nombres_map)
     resumen = resumen.rename(columns={'Valor_num': 'Suma_total_num'})
     resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
 
-    # Mapear valores numéricos para ordenamiento en resumen
+    # map de num para orden
     map_lote_num = df_detalle.dropna(subset=['Lote_num']).drop_duplicates('Lote_raw').set_index('Lote_raw')['Lote_num'].to_dict()
     map_golf_num = df_detalle.dropna(subset=['Golf_num']).drop_duplicates('Golf_raw').set_index('Golf_raw')['Golf_num'].to_dict()
     resumen['Lote_num'] = resumen['Lote_raw'].map(map_lote_num)
@@ -291,24 +438,20 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     resumen_display = resumen[['Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Suma total','Suma_total_num','Lote_num','Golf_num']].copy()
     resumen_display = resumen_display.rename(columns={'Lote_raw':'Lote','Golf_raw':'Golf'})
 
-    # ---------- Ajuste final: convertir columnas numéricas a Int64 cuando sea posible ----------
-    if 'Lote_num' in df_detalle_display.columns:
-        df_detalle_display['Lote_num'] = try_cast_int_series_safe(df_detalle_display['Lote_num'])
-    if 'Golf_num' in df_detalle_display.columns:
-        df_detalle_display['Golf_num'] = try_cast_int_series_safe(df_detalle_display['Golf_num'])
+    # ---- Int64 cuando aplique
+    for df_ in (df_detalle_display, resumen_display):
+        if 'Lote_num' in df_.columns:
+            df_['Lote_num'] = try_cast_int_series_safe(df_['Lote_num'])
+        if 'Golf_num' in df_.columns:
+            df_['Golf_num'] = try_cast_int_series_safe(df_['Golf_num'])
 
-    if 'Lote_num' in resumen_display.columns:
-        resumen_display['Lote_num'] = try_cast_int_series_safe(resumen_display['Lote_num'])
-    if 'Golf_num' in resumen_display.columns:
-        resumen_display['Golf_num'] = try_cast_int_series_safe(resumen_display['Golf_num'])
-
-    # prefer_num_or_raw seguro (evita coerción int('') al mezclar tipos)
+    # ---- preferir num si existe
     def prefer_num_or_raw(df, col_raw, col_num):
         df = df.copy()
         if col_num in df.columns:
             col_num_obj = df[col_num].astype(object)
             col_raw_obj = df[col_raw].astype(object) if col_raw in df.columns else pd.Series([''] * len(df), index=df.index, dtype=object)
-            df[col_raw] = col_num_obj.where(col_num_obj.notna(), col_raw_obj)
+            df[col_raw] = col_num_obj.where(pd.notna(col_num_obj), col_raw_obj)
         return df
 
     df_detalle_display = prefer_num_or_raw(df_detalle_display, 'Lote', 'Lote_num')
@@ -317,21 +460,21 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name):
     resumen_display = prefer_num_or_raw(resumen_display, 'Lote', 'Lote_num')
     resumen_display = prefer_num_or_raw(resumen_display, 'Golf', 'Golf_num')
 
-    # Ordenar resumen por suma
+    # ---- ordenar resumen por suma desc
     res_sorted = resumen_display.sort_values('Suma_total_num', ascending=False)
 
-    # Devolver copias limpias
-    df_detalle_display_to_save = df_detalle_display.copy()
-    res_sorted_to_save = res_sorted.copy()
+    # ---- devolver copias
+    return df_detalle_display.copy(), res_sorted.copy()
 
-    return df_detalle_display_to_save, res_sorted_to_save
-
-# ---------- UI: subida ----------
+# =========================
+# UI: subida de archivos
+# =========================
+st.markdown("### Archivos de entrada")
 col1, col2 = st.columns(2)
 with col1:
-    uploaded_personas = st.file_uploader("Sube Excel con Cuit/Cuil, Nombre, Lote, Golf", type=["xls","xlsx"], key="u_personas")
+    uploaded_personas = st.file_uploader("Subí Excel de **personas** (Cuit/Cuil, Nombre, Lote, Golf)", type=["xls","xlsx"], key="u_personas")
 with col2:
-    uploaded_banco = st.file_uploader("Sube Excel de movimientos (Concepto, Fecha, Crédito)", type=["xls","xlsx"], key="u_banco")
+    uploaded_banco = st.file_uploader("Subí Excel de **movimientos** (Concepto, Fecha, Crédito)", type=["xls","xlsx"], key="u_banco")
 
 if uploaded_personas is not None:
     st.session_state['uploaded_personas_bytes'] = uploaded_personas.read()
@@ -341,23 +484,45 @@ if uploaded_banco is not None:
     st.session_state['uploaded_banco_name'] = getattr(uploaded_banco, "name", "")
 
 st.write(" ")
+
+# =========================
+# Parámetros de procesamiento
+# =========================
+st.markdown("### Parámetros")
+colp1, colp2, colp3 = st.columns([1.3, 1.2, 2])
+with colp1:
+    validate_cuit = st.checkbox("Validar dígito de CUIT", value=True, help="Reduce falsos positivos en textos con números largos.")
+with colp2:
+    page_choice = st.selectbox("Tamaño de página", options=["25","50","75","100","200","All"], index=0)
+    page_size = None if page_choice == "All" else int(page_choice)
+with colp3:
+    exact_lote = st.checkbox("Búsqueda de Lote exacta", value=False)
+
+# =========================
+# Procesar
+# =========================
 with st.form("procesar_form"):
-    st.write("Pulsa Procesar archivos para extraer coincidencias.")
+    st.write("Pulsa **Procesar archivos** para extraer coincidencias.")
     submit = st.form_submit_button("Procesar archivos")
     if submit:
         try:
+            if not st.session_state['uploaded_personas_bytes'] or not st.session_state['uploaded_banco_bytes']:
+                st.warning("Subí **ambos** archivos antes de procesar.")
+                st.stop()
+
             df_detalle_display, res_sorted = process_files(
                 st.session_state['uploaded_personas_bytes'],
                 st.session_state['uploaded_banco_bytes'],
                 st.session_state.get('uploaded_personas_name',''),
-                st.session_state.get('uploaded_banco_name','')
+                st.session_state.get('uploaded_banco_name',''),
+                validate_cuit=validate_cuit
             )
         except Exception as e:
             st.error(f"Error en procesamiento: {e}")
             st.text("Traceback (detalles técnicos):")
             st.text(traceback.format_exc())
 
-            # Intentar leer y mostrar las primeras filas de los archivos subidos para depuración
+            # Intentar mostrar primeras filas para depuración
             try:
                 personas_df = read_excel_bytes_from_buffer(
                     st.session_state['uploaded_personas_bytes'],
@@ -367,9 +532,9 @@ with st.form("procesar_form"):
                     st.session_state['uploaded_banco_bytes'],
                     ext_hint=st.session_state.get('uploaded_banco_name','').split('.')[-1] if st.session_state.get('uploaded_banco_name') else None
                 )
-                st.markdown("**Primeras filas del archivo de personas (para depuración):**")
+                st.markdown("**Primeras filas del archivo de personas (depuración):**")
                 st.dataframe(personas_df.head(10))
-                st.markdown("**Primeras filas del archivo bancario (para depuración):**")
+                st.markdown("**Primeras filas del archivo bancario (depuración):**")
                 st.dataframe(banco_df.head(10))
             except Exception as e2:
                 st.text(f"No se pudieron leer los archivos para depuración: {e2}")
@@ -388,11 +553,9 @@ with st.form("procesar_form"):
             st.session_state['processed'] = True
             st.success("Procesamiento finalizado y resultados guardados.")
 
-# ---------- selector page size ----------
-page_choice = st.selectbox("Tamaño de página", options=["25","50","75","100","200","All"], index=0)
-page_size = None if page_choice == "All" else int(page_choice)
-
-# ---------- helper AgGrid ----------
+# =========================
+# Helper AgGrid
+# =========================
 def show_aggrid(df, height=400, page_size=25):
     df_display = df.copy()
     gb = GridOptionsBuilder.from_dataframe(df_display)
@@ -414,38 +577,61 @@ def show_aggrid(df, height=400, page_size=25):
         allow_unsafe_jscode=True,
     )
 
-# ---------- Mostrar tablas persistentes ----------
+# =========================
+# Mostrar tablas + export
+# =========================
 if st.session_state.get('df_detalle_display') is not None:
     st.markdown("---")
     st.subheader("Detalle guardado")
     df_det_show = st.session_state['df_detalle_display'].copy()
+
     cols_det = ['Fecha','Cuit/Cuil','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
     cols_det = [c for c in cols_det if c in df_det_show.columns]
     show_aggrid(df_det_show[cols_det], height=400, page_size=page_size)
-    # Export detalle CSV
+
+    # Export detalle CSV (Excel-friendly: ; y BOM)
     df_det_export = df_det_show[cols_det].copy()
     for c in ['Lote','Golf']:
         if c in df_det_export.columns:
             df_det_export[c] = df_det_export[c].apply(safe_int_like_to_str)
-    csv_det = df_det_export.to_csv(index=False).encode('utf-8')
+    csv_det = df_det_export.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button("Descargar detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv")
 
 if st.session_state.get('res_sorted') is not None:
     st.markdown("---")
     st.subheader("Resumen guardado")
     res_sorted_df = st.session_state['res_sorted'].copy()
+
     cols_res = ['Cuit/Cuil','Nombre','Lote','Golf','Suma total']
     cols_res = [c for c in cols_res if c in res_sorted_df.columns]
     show_aggrid(res_sorted_df[cols_res], height=300, page_size=page_size)
-    # Export resumen CSV
-    df_res_export = res_sorted_df[cols_res + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])].copy()
+
+    # Export resumen CSV (Excel-friendly: ; y BOM)
+    cols_res_export = cols_res + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])
+    df_res_export = res_sorted_df[cols_res_export].copy()
     for c in ['Lote','Golf']:
         if c in df_res_export.columns:
             df_res_export[c] = df_res_export[c].apply(safe_int_like_to_str)
-    csv_res = df_res_export.to_csv(index=False).encode('utf-8')
+    csv_res = df_res_export.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
     st.download_button("Descargar resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv")
 
-# ---------- Buscador por Lote ----------
+    # Export conjunto a Excel (dos hojas)
+    def dfs_to_excel_bytes(**sheets):
+        bio = io.BytesIO()
+        with pd.ExcelWriter(bio, engine="openpyxl") as writer:
+            for name, df in sheets.items():
+                df.to_excel(writer, sheet_name=name, index=False)
+        bio.seek(0)
+        return bio
+
+    excel_bytes = dfs_to_excel_bytes(Detalle=df_det_export, Resumen=df_res_export)
+    st.download_button("Descargar Excel (Detalle + Resumen)", data=excel_bytes,
+                       file_name="resultados.xlsx",
+                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+# =========================
+# Buscador por Lote
+# =========================
 st.markdown("---")
 st.subheader("Buscar por Lote (resalta coincidencias)")
 search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", value=st.session_state.get('search_lote',''), key="search_lote")
@@ -453,12 +639,18 @@ search_lote = st.text_input("Ingresá número de lote para buscar (ej: 41)", val
 if search_lote and st.session_state.get('df_detalle_display') is not None:
     search_lower = str(search_lote).strip().lower()
     df_det = st.session_state['df_detalle_display']
-    mask_det = df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+    if exact_lote:
+        mask_det = df_det['Lote'].astype(str).str.strip().str.lower() == search_lower
+    else:
+        mask_det = df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
     matches_det = df_det.loc[mask_det].copy()
     count_det = len(matches_det)
 
     res_sorted = st.session_state['res_sorted']
-    mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+    if exact_lote:
+        mask_res = res_sorted['Lote'].astype(str).str.strip().str.lower() == search_lower
+    else:
+        mask_res = res_sorted['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
     matches_res = res_sorted.loc[mask_res].copy()
     count_res = len(matches_res)
 
@@ -479,3 +671,4 @@ if search_lote and st.session_state.get('df_detalle_display') is not None:
         st.info("No se encontraron filas en el resumen para ese lote.")
 
 st.caption(f"Versión de la app: {VERSION}")
+
