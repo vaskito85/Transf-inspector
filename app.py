@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 # Config general
 # =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide", page_icon="🔎")
-VERSION = "7.1.1"
+VERSION = "7.1.2"
 
 # ---------- Estilos (CSS ligero) ----------
 CSS = """
@@ -37,7 +37,7 @@ section.main > div { padding-top: 1rem; }
   background: rgba(25,118,210,.08); color: var(--brand-2); border: 1px solid rgba(25,118,210,.2);
 }
 
-/* Badges */
+/* Badges para CUIT listado */
 .badge {
   display:inline-block; border-radius: 999px; padding:.15rem .5rem; font-size:.75rem; font-weight:600;
   border:1px solid; vertical-align: middle;
@@ -311,14 +311,13 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
         if validate_cuit:
             found_all = {c for c in found_all if cuit_is_valid(c)}
         found_listed   = set(found_all) & cuit_set
-        found_unknown  = set(found_all) - cuit_set
 
         if show_unknown:
             found = set(found_all)
         else:
             found = found_listed
 
-        # fallback textual por si aparece con separadores en Concepto
+        # fallback textual
         if not found:
             concepto = str(row.get(concepto_col, ''))
             found_raw = set()
@@ -329,7 +328,6 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
                         found_raw.add(cd)
             found = found or found_raw
             found_listed = found & cuit_set
-            found_unknown = found - cuit_set
 
         if found:
             matches_idx.append(idx)
@@ -470,15 +468,18 @@ st.write("")
 # =========================
 # Helper de grilla (con JsCode y key)
 # =========================
-def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, theme="alpine"):
+# - Forzamos strings en columnas textuales.
+# - Renderizamos el badge con un cellRenderer que crea un elemento y le setea innerHTML.
+# - Usamos tema 'alpine-dark' para que acompañe modo oscuro de la app.
+def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, theme="alpine-dark"):
     df_display = df.copy()
 
-    # Asegurar strings en columnas textuales (evita .includes sobre tipos no string)
+    # Asegurar strings en columnas textuales
     for col in ['CUIT listado', 'Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Fecha', 'Concepto encontrado']:
         if col in df_display.columns:
             df_display[col] = df_display[col].astype(str)
 
-    # Decorar "CUIT listado" con badge si corresponde
+    # Decoración del badge: inyectamos el HTML directamente en el valor
     if enable_badge and 'CUIT listado' in df_display.columns:
         df_display['CUIT listado'] = df_display['CUIT listado'].map(
             lambda v: f'<span class="badge {"badge-listed" if v=="Sí" else "badge-unknown"}">{v}</span>'
@@ -494,25 +495,21 @@ def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, 
     else:
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
 
-    # No marcar 'Valor transferido' como numericColumn porque está formateado como texto.
-    # Si querés ordenar por monto real, podemos agregar una columna oculta con el valor numérico.
-
-    # Renderer JS para HTML (badge) — con JsCode
+    # Renderer JS que asegura render de HTML (innerHTML)
     if enable_badge and 'CUIT listado' in df_display.columns:
-        js_formatter = JsCode("""
+        js_html_renderer = JsCode("""
             function(params){
-                var html = params.value;
-                if (html && typeof html === 'string' && html.indexOf('<span') === 0) {
-                    return html;
-                }
-                return html;
+                const e = document.createElement('span');
+                // Aceptamos HTML controlado por el servidor
+                e.innerHTML = params.value || '';
+                return e;
             }
         """)
-        gb.configure_column('CUIT listado', cellRenderer=js_formatter, wrapText=True, autoHeight=True)
+        gb.configure_column('CUIT listado', cellRenderer=js_html_renderer, autoHeight=True)
 
     go = gb.build()
 
-    # Tooltips solo con nombres de campo válidos
+    # Tooltips sólo con nombres de campo válidos
     if 'columnDefs' in go:
         for cdef in go['columnDefs']:
             if cdef.get('field') in ('Concepto encontrado', 'Nombre'):
@@ -527,9 +524,9 @@ def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, 
         height=height,
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_mode=GridUpdateMode.NO_UPDATE,
-        allow_unsafe_jscode=True,   # necesario para JsCode
-        theme=theme,
-        key=key,                    # clave única SIEMPRE
+        allow_unsafe_jscode=True,         # necesario para JsCode
+        theme=theme,                      # USAR TEMA OSCURO
+        key=key,                          # clave única SIEMPRE
     )
 
 # =========================
@@ -639,7 +636,7 @@ with tab_resultados:
             page_size=st.session_state.get('page_size', 25),
             key="grid_detalle_main",
             enable_badge=True,
-            theme="alpine"
+            theme="alpine-dark"     # <- oscuro
         )
 
         st.write("")
@@ -653,7 +650,7 @@ with tab_resultados:
             page_size=st.session_state.get('page_size', 25),
             key="grid_resumen_main",
             enable_badge=False,
-            theme="alpine"
+            theme="alpine-dark"     # <- oscuro
         )
 
         # Descargas
@@ -721,7 +718,7 @@ with tab_buscar:
                         page_size=st.session_state.get('page_size', 25),
                         key=f"grid_busq_lote_{search_lower}_{int(exact_lote)}",
                         enable_badge=True,
-                        theme="alpine"
+                        theme="alpine-dark"   # <- oscuro
                     )
 
         # Búsqueda por palabra clave
@@ -745,7 +742,7 @@ with tab_buscar:
                         page_size=st.session_state.get('page_size', 25),
                         key=f"grid_busq_kw_{kw_lower}",
                         enable_badge=True,
-                        theme="alpine"
+                        theme="alpine-dark"   # <- oscuro
                     )
 
         # Búsqueda por CUIT/CUIL
@@ -774,18 +771,18 @@ with tab_buscar:
                             page_size=st.session_state.get('page_size', 25),
                             key=f"grid_busq_cuit_{q_digits}_{int(exact_cuit)}",
                             enable_badge=True,
-                            theme="alpine"
+                            theme="alpine-dark"   # <- oscuro
                         )
 
 with tab_ajustes:
     st.markdown('### <span class="icon">⚙️</span>Ajustes y ayuda', unsafe_allow_html=True)
     st.markdown("""
-- **Grilla:** AG Grid (tema *alpine*) con filtros, orden y copia tabulada.
+- **Grilla:** AG Grid (tema *alpine-dark*) con filtros, orden y copia tabulada.
 - **Badges:**  
   - <span class="badge badge-listed">Sí</span> = CUIT presente en Personas  
   - <span class="badge badge-unknown">No</span> = CUIT detectado en Concepto pero **no** listado
 - **Descargas:** CSV con `;` y **BOM** para abrir directo en Excel, o Excel con 2 hojas.
-- **Tip:** si querés un modo oscuro/clarito fijo, armamos un `.streamlit/config.toml`.
+- ¿Querés ordenar por *monto real*? Agregamos una columna oculta con `Valor_num` y ordenamos por esa manteniendo el formato AR$ a la vista.
     """, unsafe_allow_html=True)
 
 st.caption(f"Versión de la app: {VERSION}")
