@@ -10,15 +10,12 @@ from PIL import Image, ImageDraw
 # Config general
 # =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide", page_icon="🔎")
-VERSION = "7.1.2"
+VERSION = "7.1.3"
 
 # ---------- Estilos (CSS ligero) ----------
 CSS = """
 <style>
-:root {
-  --brand: #1976d2;
-  --brand-2: #0d47a1;
-}
+:root { --brand: #1976d2; --brand-2: #0d47a1; }
 html, body, [class*="css"]  { font-family: "Inter", system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial; }
 section.main > div { padding-top: 1rem; }
 
@@ -31,17 +28,12 @@ section.main > div { padding-top: 1rem; }
 }
 .hero h1 { margin: 0; font-weight: 800; letter-spacing: -0.01em; }
 .hero .chips { display:flex; gap:.5rem; flex-wrap:wrap; margin-top:.25rem }
-.chip {
-  display:inline-flex; align-items:center; gap:.4rem;
-  border-radius: 999px; padding:.25rem .6rem; font-size:.85rem;
-  background: rgba(25,118,210,.08); color: var(--brand-2); border: 1px solid rgba(25,118,210,.2);
-}
+.chip { display:inline-flex; align-items:center; gap:.4rem; border-radius: 999px; padding:.25rem .6rem; font-size:.85rem;
+  background: rgba(25,118,210,.08); color: var(--brand-2); border: 1px solid rgba(25,118,210,.2); }
 
 /* Badges para CUIT listado */
-.badge {
-  display:inline-block; border-radius: 999px; padding:.15rem .5rem; font-size:.75rem; font-weight:600;
-  border:1px solid; vertical-align: middle;
-}
+.badge { display:inline-block; border-radius: 999px; padding:.15rem .5rem; font-size:.75rem; font-weight:600;
+  border:1px solid; vertical-align: middle; }
 .badge-unknown { color:#a855f7; border-color:#a855f7; background: rgba(168,85,247,.08); }
 .badge-listed  { color:#16a34a; border-color:#16a34a; background: rgba(22,163,74,.08); }
 
@@ -92,42 +84,29 @@ for key, default in {
 # =========================
 # Utilidades de negocio
 # =========================
-def only_digits(s):
-    return re.sub(r'\D', '', str(s) if s is not None else '')
+def only_digits(s): return re.sub(r'\D', '', str(s) if s is not None else '')
 
 def format_currency_ar(value):
-    try:
-        v = float(value)
-    except Exception:
-        return '' if value is None else str(value)
-    sign = '-' if v < 0 else ''
-    v_abs = abs(v)
-    s = f"{v_abs:,.2f}"
-    s = s.replace(',', 'X').replace('.', ',').replace('X', '.')
+    try: v = float(value)
+    except Exception: return '' if value is None else str(value)
+    sign = '-' if v < 0 else ''; v_abs = abs(v)
+    s = f"{v_abs:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
-def is_integer_string(s: str) -> bool:
-    return bool(re.fullmatch(r'[+-]?\d+', s.strip()))
-
-def is_float_string(s: str) -> bool:
-    return bool(re.fullmatch(r'[+-]?\d+\.\d+', s.strip()))
+def is_integer_string(s): return bool(re.fullmatch(r'[+-]?\d+', str(s).strip()))
+def is_float_string(s):   return bool(re.fullmatch(r'[+-]?\d+\.\d+', str(s).strip()))
 
 def safe_int_like_to_str(v):
     try:
-        if pd.isna(v):
-            return ''
-        if isinstance(v, int) and not isinstance(v, bool):
-            return str(v)
+        if pd.isna(v): return ''
+        if isinstance(v, int) and not isinstance(v, bool): return str(v)
         try:
             import numpy as np
-            if isinstance(v, (np.integer,)):
-                return str(int(v))
-        except Exception:
-            pass
+            if isinstance(v, (np.integer,)): return str(int(v))
+        except: pass
         if hasattr(v, 'item'):
             vv = v.item()
-            if isinstance(vv, int) and not isinstance(vv, bool):
-                return str(vv)
+            if isinstance(vv, int) and not isinstance(vv, bool): return str(vv)
             if isinstance(vv, float):
                 if float(vv).is_integer(): return str(int(vv))
                 return str(vv)
@@ -140,32 +119,25 @@ def safe_int_like_to_str(v):
             if is_integer_string(s): return s
             if is_float_string(s):
                 try:
-                    f = float(s)
-                    if f.is_integer(): return str(int(f))
-                except Exception: pass
+                    f = float(s);  return str(int(f)) if f.is_integer() else str(f)
+                except: pass
             return s
         s = str(v).strip()
         if s == '': return ''
         if is_integer_string(s): return s
         if is_float_string(s):
-            try:
-                f = float(s)
-                if f.is_integer(): return str(int(f))
-            except Exception: pass
+            try: f = float(s); return str(int(f)) if f.is_integer() else str(f)
+            except: pass
         return s
-    except Exception:
-        return ''
+    except: return ''
 
 def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
     try:
-        s2 = s.copy()
-        numeric = pd.to_numeric(s2, errors='coerce')
-        non_null = numeric.dropna()
+        s2 = s.copy(); numeric = pd.to_numeric(s2, errors='coerce'); non_null = numeric.dropna()
         if non_null.empty: return s2
         if (non_null % 1 == 0).all(): return numeric.astype('Int64')
         return s2
-    except Exception:
-        return s
+    except: return s
 
 def unique_join(values):
     seen, result = set(), []
@@ -176,8 +148,7 @@ def unique_join(values):
     return " / ".join(result)
 
 def find_col(df: pd.DataFrame, keywords):
-    cols = [str(c) for c in df.columns]
-    kl = [k.lower() for k in keywords]
+    cols = [str(c) for c in df.columns]; kl = [k.lower() for k in keywords]
     for k in kl:
         for c in cols:
             if c.lower() == k: return c
@@ -208,7 +179,7 @@ def parse_money_ar(s: str):
         int_part = re.sub(r'[.,]', '', s[:idx]); dec_part = s[idx+1:]
         s_clean = f"{int_part}.{dec_part}"
     try:
-        val = float(s_clean);  val = -val if neg else val;  return val
+        val = float(s_clean);  return -val if neg else val
     except: return float('nan')
 
 def get_credit_value_from_row(row: pd.Series, credito_col: str, df_cols: list, max_look_ahead: int = 2):
@@ -233,20 +204,17 @@ def cuit_is_valid(cuit_digits: str) -> bool:
     digits = list(map(int, cuit_digits))
     factors = [5,4,3,2,7,6,5,4,3,2]
     s = sum(d * f for d, f in zip(digits[:10], factors))
-    mod = 11 - (s % 11)
-    check = 0 if mod == 11 else (9 if mod == 10 else mod)
+    mod = 11 - (s % 11); check = 0 if mod == 11 else (9 if mod == 10 else mod)
     return check == digits[10]
 
-def extract_digit_runs(s):
-    return re.findall(r'\d{7,}', s or '')
-
+def extract_digit_runs(s): return re.findall(r'\d{7,}', s or '')
 def find_cuits_in_text(concepto_digits: str):
     found = set()
     if not concepto_digits: return found
     for run in extract_digit_runs(concepto_digits):
         if len(run) < CUIT_LEN: continue
         for i in range(len(run) - CUIT_LEN + 1):
-            sub = run[i:i+CUIT_LEN]; found.add(sub)
+            found.add(run[i:i+CUIT_LEN])
     return found
 
 # =========================
@@ -254,8 +222,7 @@ def find_cuits_in_text(concepto_digits: str):
 # =========================
 @st.cache_data
 def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
-    if not buf_bytes:
-        raise ValueError("Archivo vacío o no cargado.")
+    if not buf_bytes: raise ValueError("Archivo vacío o no cargado.")
     buf = io.BytesIO(buf_bytes)
     try:
         if ext_hint and ext_hint.lower() == "xls":
@@ -263,8 +230,7 @@ def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
         else:
             return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
     except Exception:
-        buf.seek(0)
-        return pd.read_excel(buf, dtype=str).fillna('')
+        buf.seek(0); return pd.read_excel(buf, dtype=str).fillna('')
 
 # =========================
 # Procesamiento principal
@@ -291,8 +257,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
     personas['cuit_digits'] = personas['cuit_raw'].apply(only_digits)
 
     cuit_list = [c for c in personas['cuit_digits'].dropna().unique().tolist() if c]
-    if validate_cuit:
-        cuit_list = [c for c in cuit_list if cuit_is_valid(c)]
+    if validate_cuit: cuit_list = [c for c in cuit_list if cuit_is_valid(c)]
     cuit_set = set(cuit_list)
 
     if len(cuit_list) == 0 and not show_unknown:
@@ -301,51 +266,37 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
     banco['Concepto_str']    = banco[concepto_col].astype(str)
     banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
 
-    matches_idx = []
-    found_map = {}    # idx banco -> set(cuits_encontrados)
-    listed_map = {}   # idx banco -> dict(cuit -> is_listed_bool)
-
+    matches_idx, found_map, listed_map = [], {}, {}
     for idx, row in banco.iterrows():
         concepto_digits = row['Concepto_digits']
         found_all = find_cuits_in_text(concepto_digits)
-        if validate_cuit:
-            found_all = {c for c in found_all if cuit_is_valid(c)}
-        found_listed   = set(found_all) & cuit_set
+        if validate_cuit: found_all = {c for c in found_all if cuit_is_valid(c)}
+        found_listed = set(found_all) & cuit_set
+        found = set(found_all) if show_unknown else found_listed
 
-        if show_unknown:
-            found = set(found_all)
-        else:
-            found = found_listed
-
-        # fallback textual
         if not found:
             concepto = str(row.get(concepto_col, ''))
             found_raw = set()
             for c_raw in personas['cuit_raw'].dropna().unique():
                 if c_raw and c_raw.strip() and c_raw.lower() in concepto.lower():
                     cd = only_digits(c_raw)
-                    if (not validate_cuit) or cuit_is_valid(cd):
-                        found_raw.add(cd)
-            found = found or found_raw
-            found_listed = found & cuit_set
+                    if (not validate_cuit) or cuit_is_valid(cd): found_raw.add(cd)
+            found = found or found_raw; found_listed = found & cuit_set
 
         if found:
             matches_idx.append(idx)
             found_map[idx] = found
             listed_map[idx] = {c: (c in cuit_set) for c in found}
 
-    if not matches_idx:
-        return pd.DataFrame(), pd.DataFrame(), {}
+    if not matches_idx: return pd.DataFrame(), pd.DataFrame(), {}
 
-    matches = banco.loc[matches_idx].copy()
-    banco_cols = list(banco.columns)
+    matches = banco.loc[matches_idx].copy(); banco_cols = list(banco.columns)
 
     resultados = []
     for idx, m in matches.iterrows():
         concepto = str(m.get(concepto_col, ''))
         fecha_val = m.get(fecha_col, '') if fecha_col else ''
         fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
-
         credito_val = get_credit_value_from_row(m, credito_col, banco_cols, max_look_ahead=2)
         credito_num = parse_money_ar(credito_val)
 
@@ -376,8 +327,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
             })
 
     df_detalle = pd.DataFrame(resultados)
-    if df_detalle.empty:
-        return pd.DataFrame(), pd.DataFrame(), {}
+    if df_detalle.empty: return pd.DataFrame(), pd.DataFrame(), {}
 
     df_detalle['Fecha'] = pd.to_datetime(df_detalle['Fecha'], dayfirst=True, errors='coerce')
     df_detalle = df_detalle.sort_values(['Cuit/Cuil', 'Fecha'])
@@ -392,10 +342,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
     cols_base = ['Fecha_str','Cuit/Cuil','CUIT_digits','CUIT listado','Nombre','Lote_raw','Golf_raw','Lote_num','Golf_num','Valor_formateado','Concepto encontrado']
     cols_base = [c for c in cols_base if c in df_detalle.columns]
     df_detalle_display = df_detalle[cols_base].copy().rename(columns={
-        'Fecha_str': 'Fecha',
-        'Lote_raw': 'Lote',
-        'Golf_raw': 'Golf',
-        'Valor_formateado': 'Valor transferido'
+        'Fecha_str': 'Fecha', 'Lote_raw': 'Lote', 'Golf_raw': 'Golf', 'Valor_formateado': 'Valor transferido'
     })
 
     df_resumen = df_detalle.copy()
@@ -413,7 +360,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
     resumen['Golf_num'] = resumen['Golf_raw'].map(map_golf_num)
 
     resumen_display = resumen[['Cuit/Cuil','Nombre','Lote_raw','Golf_raw','Suma total','Suma_total_num','Lote_num','Golf_num']].copy()\
-                         .rename(columns={'Lote_raw':'Lote','Golf_raw':'Golf'})
+                        .rename(columns={'Lote_raw':'Lote','Golf_raw':'Golf'})
 
     for df_ in (df_detalle_display, resumen_display):
         if 'Lote_num' in df_.columns: df_['Lote_num'] = try_cast_int_series_safe(df_['Lote_num'])
@@ -468,18 +415,18 @@ st.write("")
 # =========================
 # Helper de grilla (con JsCode y key)
 # =========================
-# - Forzamos strings en columnas textuales.
-# - Renderizamos el badge con un cellRenderer que crea un elemento y le setea innerHTML.
-# - Usamos tema 'alpine-dark' para que acompañe modo oscuro de la app.
+# - Forzamos strings en columnas textuales
+# - Renderer CLASE (AG Grid) -> evita devolver HTMLElement directo (causa del error #31)
+# - Tema oscuro: alpine-dark
 def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, theme="alpine-dark"):
     df_display = df.copy()
 
-    # Asegurar strings en columnas textuales
+    # Asegurar strings en columnas textuales (evita .includes sobre tipos no string)
     for col in ['CUIT listado', 'Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Fecha', 'Concepto encontrado']:
         if col in df_display.columns:
             df_display[col] = df_display[col].astype(str)
 
-    # Decoración del badge: inyectamos el HTML directamente en el valor
+    # Decoración del badge (insertaremos HTML por renderer)
     if enable_badge and 'CUIT listado' in df_display.columns:
         df_display['CUIT listado'] = df_display['CUIT listado'].map(
             lambda v: f'<span class="badge {"badge-listed" if v=="Sí" else "badge-unknown"}">{v}</span>'
@@ -495,21 +442,23 @@ def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, 
     else:
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
 
-    # Renderer JS que asegura render de HTML (innerHTML)
+    # Renderer CLASE que retorna getGui (no HTMLElement directo en retorno de función)
     if enable_badge and 'CUIT listado' in df_display.columns:
-        js_html_renderer = JsCode("""
-            function(params){
-                const e = document.createElement('span');
-                // Aceptamos HTML controlado por el servidor
-                e.innerHTML = params.value || '';
-                return e;
+        raw_html_renderer = JsCode("""
+            class RawHtmlRenderer {
+                init(params) {
+                    this.eGui = document.createElement('span');
+                    this.eGui.innerHTML = params.value || '';
+                }
+                getGui() { return this.eGui; }
+                refresh() { return false; }
             }
         """)
-        gb.configure_column('CUIT listado', cellRenderer=js_html_renderer, autoHeight=True)
+        gb.configure_column('CUIT listado', cellRenderer=raw_html_renderer, autoHeight=True)
 
     go = gb.build()
 
-    # Tooltips sólo con nombres de campo válidos
+    # Tooltips por nombre de campo
     if 'columnDefs' in go:
         for cdef in go['columnDefs']:
             if cdef.get('field') in ('Concepto encontrado', 'Nombre'):
@@ -524,9 +473,9 @@ def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_badge=False, 
         height=height,
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_mode=GridUpdateMode.NO_UPDATE,
-        allow_unsafe_jscode=True,         # necesario para JsCode
-        theme=theme,                      # USAR TEMA OSCURO
-        key=key,                          # clave única SIEMPRE
+        allow_unsafe_jscode=True,     # necesario para JsCode
+        theme=theme,                  # oscuro
+        key=key,                      # clave única
     )
 
 # =========================
@@ -636,7 +585,7 @@ with tab_resultados:
             page_size=st.session_state.get('page_size', 25),
             key="grid_detalle_main",
             enable_badge=True,
-            theme="alpine-dark"     # <- oscuro
+            theme="alpine-dark"
         )
 
         st.write("")
@@ -650,7 +599,7 @@ with tab_resultados:
             page_size=st.session_state.get('page_size', 25),
             key="grid_resumen_main",
             enable_badge=False,
-            theme="alpine-dark"     # <- oscuro
+            theme="alpine-dark"
         )
 
         # Descargas
@@ -659,14 +608,12 @@ with tab_resultados:
         # CSVs
         df_det_export = df_det_show[det_cols].copy()
         for c in ['Lote','Golf']:
-            if c in df_det_export.columns:
-                df_det_export[c] = df_det_export[c].apply(safe_int_like_to_str)
+            if c in df_det_export.columns: df_det_export[c] = df_det_export[c].apply(safe_int_like_to_str)
         csv_det = df_det_export.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
 
         df_res_export = res_sorted_df[res_cols + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])].copy()
         for c in ['Lote','Golf']:
-            if c in df_res_export.columns:
-                df_res_export[c] = df_res_export[c].apply(safe_int_like_to_str)
+            if c in df_res_export.columns: df_res_export[c] = df_res_export[c].apply(safe_int_like_to_str)
         csv_res = df_res_export.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
 
         # Excel (dos hojas)
@@ -674,54 +621,41 @@ with tab_resultados:
             bio = io.BytesIO()
             with pd.ExcelWriter(bio, engine="openpyxl") as writer:
                 for name, df in sheets.items(): df.to_excel(writer, sheet_name=name, index=False)
-            bio.seek(0)
-            return bio
+            bio.seek(0); return bio
         excel_bytes = dfs_to_excel_bytes(Detalle=df_det_export, Resumen=df_res_export)
 
         cdl1, cdl2, cdl3 = st.columns([1.2, 1.2, 1.6])
-        with cdl1:
-            st.download_button("⬇️ Detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv", use_container_width=True, key="dl_detalle_csv")
-        with cdl2:
-            st.download_button("⬇️ Resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv", use_container_width=True, key="dl_resumen_csv")
-        with cdl3:
-            st.download_button("⬇️ Excel (Detalle + Resumen)", data=excel_bytes,
-                               file_name="resultados.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               use_container_width=True,
-                               key="dl_excel_xlsx")
-        st.markdown('</div>', unsafe_allow_html=True)
+        with cdl1: st.download_button("⬇️ Detalle CSV", data=csv_det, file_name="detalle.csv", mime="text/csv", use_container_width=True, key="dl_detalle_csv")
+        with cdl2: st.download_button("⬇️ Resumen CSV", data=csv_res, file_name="resumen.csv", mime="text/csv", use_container_width=True, key="dl_resumen_csv")
+        with cdl3: st.download_button("⬇️ Excel (Detalle + Resumen)", data=excel_bytes, file_name="resultados.xlsx",
+                                       mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                                       use_container_width=True, key="dl_excel_xlsx")
 
 with tab_buscar:
     st.markdown('### <span class="icon">🔎</span>Buscadores', unsafe_allow_html=True)
     if st.session_state.get('df_detalle_display') is None:
         st.info("No hay resultados procesados para buscar. Procesá primero.")
     else:
-        # Búsqueda por Lote
+        # Buscar por Lote
         with st.expander("🏷️ Buscar por Lote"):
             exact_lote = st.checkbox("Coincidencia exacta", value=False, key="exact_lote")
             search_lote = st.text_input("Número de lote (ej: 41)", value=st.session_state.get('search_lote',''), key="input_lote")
             if search_lote:
                 search_lower = str(search_lote).strip().lower()
                 df_det = st.session_state['df_detalle_display']
-                if exact_lote:
-                    mask_det = df_det['Lote'].astype(str).str.strip().str.lower() == search_lower
-                else:
-                    mask_det = df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+                mask_det = (df_det['Lote'].astype(str).str.strip().str.lower() == search_lower) if exact_lote \
+                           else df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
                 matches_det = df_det.loc[mask_det].copy()
                 st.write(f"Coincidencias (detalle): **{len(matches_det)}**")
                 if len(matches_det) > 0:
                     det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
                     det_cols = [c for c in det_cols if c in matches_det.columns]
                     show_aggrid(
-                        matches_det[det_cols],
-                        height=300,
-                        page_size=st.session_state.get('page_size', 25),
-                        key=f"grid_busq_lote_{search_lower}_{int(exact_lote)}",
-                        enable_badge=True,
-                        theme="alpine-dark"   # <- oscuro
+                        matches_det[det_cols], height=300, page_size=st.session_state.get('page_size', 25),
+                        key=f"grid_busq_lote_{search_lower}_{int(exact_lote)}", enable_badge=True, theme="alpine-dark"
                     )
 
-        # Búsqueda por palabra clave
+        # Buscar por palabra clave
         with st.expander("🧠 Buscar por palabra clave (Concepto / Nombre)", expanded=True):
             search_kw = st.text_input("Palabra clave", value=st.session_state.get('search_kw',''), key="input_kw")
             if search_kw:
@@ -737,15 +671,11 @@ with tab_buscar:
                     det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
                     det_cols = [c for c in det_cols if c in matches_det_kw.columns]
                     show_aggrid(
-                        matches_det_kw[det_cols],
-                        height=300,
-                        page_size=st.session_state.get('page_size', 25),
-                        key=f"grid_busq_kw_{kw_lower}",
-                        enable_badge=True,
-                        theme="alpine-dark"   # <- oscuro
+                        matches_det_kw[det_cols], height=300, page_size=st.session_state.get('page_size', 25),
+                        key=f"grid_busq_kw_{kw_lower}", enable_badge=True, theme="alpine-dark"
                     )
 
-        # Búsqueda por CUIT/CUIL
+        # Buscar por CUIT/CUIL
         with st.expander("🆔 Buscar por CUIT/CUIL", expanded=True):
             col_cuit_a, col_cuit_b = st.columns([2, 1])
             with col_cuit_a:
@@ -766,12 +696,8 @@ with tab_buscar:
                         det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
                         det_cols = [c for c in det_cols if c in matches_det_cuit.columns]
                         show_aggrid(
-                            matches_det_cuit[det_cols],
-                            height=300,
-                            page_size=st.session_state.get('page_size', 25),
-                            key=f"grid_busq_cuit_{q_digits}_{int(exact_cuit)}",
-                            enable_badge=True,
-                            theme="alpine-dark"   # <- oscuro
+                            matches_det_cuit[det_cols], height=300, page_size=st.session_state.get('page_size', 25),
+                            key=f"grid_busq_cuit_{q_digits}_{int(exact_cuit)}", enable_badge=True, theme="alpine-dark"
                         )
 
 with tab_ajustes:
@@ -782,7 +708,7 @@ with tab_ajustes:
   - <span class="badge badge-listed">Sí</span> = CUIT presente en Personas  
   - <span class="badge badge-unknown">No</span> = CUIT detectado en Concepto pero **no** listado
 - **Descargas:** CSV con `;` y **BOM** para abrir directo en Excel, o Excel con 2 hojas.
-- ¿Querés ordenar por *monto real*? Agregamos una columna oculta con `Valor_num` y ordenamos por esa manteniendo el formato AR$ a la vista.
+- ¿Querés ordenar por *monto real*? Agregamos una columna oculta con `Valor_num` para ordenación precisa.
     """, unsafe_allow_html=True)
 
 st.caption(f"Versión de la app: {VERSION}")
