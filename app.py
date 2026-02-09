@@ -10,7 +10,7 @@ from PIL import Image, ImageDraw
 # Config general
 # =========================
 st.set_page_config(page_title="Buscador CUIT - Movimientos", layout="wide", page_icon="🔎")
-VERSION = "7.1.4"
+VERSION = "7.2.0"
 
 # ---------- Estilos (CSS ligero) ----------
 CSS = """
@@ -77,12 +77,16 @@ for key, default in {
 # =========================
 # Utilidades de negocio
 # =========================
-def only_digits(s): return re.sub(r'\D', '', str(s) if s is not None else '')
+def only_digits(s): 
+    return re.sub(r'\D', '', str(s) if s is not None else '')
 
 def format_currency_ar(value):
-    try: v = float(value)
-    except Exception: return '' if value is None else str(value)
-    sign = '-' if v < 0 else ''; v_abs = abs(v)
+    try:
+        v = float(value)
+    except Exception:
+        return '' if value is None else str(value)
+    sign = '-' if v < 0 else ''
+    v_abs = abs(v)
     s = f"{v_abs:,.2f}".replace(',', 'X').replace('.', ',').replace('X', '.')
     return sign + s
 
@@ -96,7 +100,8 @@ def safe_int_like_to_str(v):
         try:
             import numpy as np
             if isinstance(v, (np.integer,)): return str(int(v))
-        except: pass
+        except:
+            pass
         if hasattr(v, 'item'):
             vv = v.item()
             if isinstance(vv, int) and not isinstance(vv, bool): return str(vv)
@@ -113,24 +118,31 @@ def safe_int_like_to_str(v):
             if is_float_string(s):
                 try:
                     f = float(s);  return str(int(f)) if f.is_integer() else str(f)
-                except: pass
+                except:
+                    pass
             return s
         s = str(v).strip()
         if s == '': return ''
         if is_integer_string(s): return s
         if is_float_string(s):
-            try: f = float(s); return str(int(f)) if f.is_integer() else str(f)
-            except: pass
+            try:
+                f = float(s); return str(int(f)) if f.is_integer() else str(f)
+            except:
+                pass
         return s
-    except: return ''
+    except:
+        return ''
 
 def try_cast_int_series_safe(s: pd.Series) -> pd.Series:
     try:
-        s2 = s.copy(); numeric = pd.to_numeric(s2, errors='coerce'); non_null = numeric.dropna()
+        s2 = s.copy()
+        numeric = pd.to_numeric(s2, errors='coerce')
+        non_null = numeric.dropna()
         if non_null.empty: return s2
         if (non_null % 1 == 0).all(): return numeric.astype('Int64')
         return s2
-    except: return s
+    except:
+        return s
 
 def unique_join(values):
     seen, result = set(), []
@@ -153,17 +165,38 @@ def find_col(df: pd.DataFrame, keywords):
             if k in c.lower(): return c
     return None
 
+# --- Parser AR/EN de dinero (robusto, maneja negativos al final, paréntesis, CR/DB, y unicode minus) ---
 def parse_money_ar(s: str):
-    if s is None: return float('nan')
+    if s is None:
+        return float('nan')
     if isinstance(s, (int, float)):
-        try: return float(s)
-        except: return float('nan')
+        try:
+            return float(s)
+        except:
+            return float('nan')
+
     s = str(s).strip()
-    if s == '': return float('nan')
+    if s == '':
+        return float('nan')
+
+    # Normalizaciones típicas de extractos
+    s = s.replace('\u2212', '-')  # minus sign unicode
+    # Quitar etiquetas texto comunes (CR/DB/cred/debe)
+    s = re.sub(r'(?i)\b(cr|db|cred|debe|credito|crédito|d[eé]bito)\b', '', s)
+
+    # Negativo al final: "1.234,56-" -> "-1.234,56"
+    if re.search(r'[-–−]\s*$', s):
+        s = '-' + re.sub(r'[-–−]\s*$', '', s)
+
+    # Conservar dígitos/separadores/signos/paréntesis
     s = re.sub(r'[^\d,.\-\(\)]', '', s)
+
     neg = False
-    if s.startswith('(') and s.endswith(')'): neg=True; s=s[1:-1]
-    last_comma = s.rfind(','); last_dot = s.rfind('.')
+    if s.startswith('(') and s.endswith(')'):
+        neg = True
+        s = s[1:-1]
+
+    last_comma, last_dot = s.rfind(','), s.rfind('.')
     if last_comma == -1 and last_dot == -1:
         s_clean = re.sub(r'[,.]', '', s)
     else:
@@ -171,9 +204,14 @@ def parse_money_ar(s: str):
         idx = last_comma if dec == ',' else last_dot
         int_part = re.sub(r'[.,]', '', s[:idx]); dec_part = s[idx+1:]
         s_clean = f"{int_part}.{dec_part}"
+
     try:
-        val = float(s_clean);  return -val if neg else val
-    except: return float('nan')
+        val = float(s_clean)
+        if neg or s.strip().startswith('-'):
+            val = -val
+        return val
+    except:
+        return float('nan')
 
 def get_credit_value_from_row(row: pd.Series, credito_col: str, df_cols: list, max_look_ahead: int = 2):
     def looks_symbolic(x: str) -> bool:
@@ -188,7 +226,8 @@ def get_credit_value_from_row(row: pd.Series, credito_col: str, df_cols: list, m
                 vnext = row.get(df_cols[j + k], '')
                 if not looks_symbolic(vnext) and re.search(r'\d', str(vnext)):
                     return vnext
-    except: pass
+    except:
+        pass
     return val
 
 CUIT_LEN = 11
@@ -201,7 +240,9 @@ def cuit_is_valid(cuit_digits: str) -> bool:
     return check == digits[10]
 
 def extract_digit_runs(s): return re.findall(r'\d{7,}', s or '')
+
 def find_cuits_in_text(concepto_digits: str):
+    """Versión usada en modo comparado; trabaja sobre solo dígitos."""
     found = set()
     if not concepto_digits: return found
     for run in extract_digit_runs(concepto_digits):
@@ -210,32 +251,137 @@ def find_cuits_in_text(concepto_digits: str):
             found.add(run[i:i+CUIT_LEN])
     return found
 
+# --- Detectar CUIT/CUIL con o sin separadores (para modo banco-only) ---
+CUIT_RE = re.compile(
+    r'(?<!\d)'                              # no dígito antes
+    r'(\d{2})\D?(\d{8})\D?(\d{1})'          # 2-8-1 con separadores opcionales
+    r'(?!\d)',                              # no dígito después
+    flags=re.UNICODE
+)
+
+def find_cuits_in_free_text(s: str):
+    """Devuelve set de CUITs normalizados (11 dígitos) hallados en s libre."""
+    if not s:
+        return set()
+    out = set()
+    for m in CUIT_RE.finditer(str(s)):
+        out.add("".join(m.groups()))
+    return out
+
+# --- Heurística simple para extraer el nombre cerca del CUIT (modo banco-only) ---
+STOPWORDS_UPPER = {
+    'DE','DEL','LA','LOS','LAS','A','AL','POR','PARA','EN','DA','DO','Y','E','O','U',
+    'CTA','NRO','Nº','CUENTA','BANCO','TRANSFERENCIA','TRANSF','CBU','ALIAS','REF','REF.',
+    'COMISION','COMISIONES','IMP','IVA','DEBITO','CR','DB','CR.','DÉBITO','CRÉDITO','PAGO','A/'
+}
+
+def guess_name_around_cuit(concepto: str, cuit_digits: str, window_tokens: int = 8):
+    """
+    Busca el CUIT en el concepto y toma una ventana de tokens alrededor.
+    Retorna un nombre probable (string) o '' si no encuentra algo razonable.
+    """
+    if not concepto:
+        return ''
+    text = str(concepto)
+
+    # Patrón flexible para el CUIT específico
+    c = cuit_digits
+    cpat = re.compile(rf'(?<!\d){c[:2]}\D*{c[2:10]}\D*{c[10]}(?!\d)')
+
+    m = cpat.search(text)
+    if not m:
+        return ''
+
+    # Tokenizar: palabras/números
+    tokens = re.findall(r"[A-Za-zÁÉÍÓÚÜÑáéíóúüñ.'/-]+|\d+", text, flags=re.UNICODE)
+
+    # Offsets de tokens para ubicar ventana
+    spans = []
+    pos = 0
+    for tok in tokens:
+        idx = text.find(tok, pos)
+        if idx == -1:
+            idx = pos
+        spans.append((tok, idx, idx + len(tok)))
+        pos = idx + len(tok)
+
+    center_idx = None
+    for i, (_, a, b) in enumerate(spans):
+        if not (b <= m.start() or a >= m.end()):
+            center_idx = i
+            break
+    if center_idx is None:
+        center_idx = max(0, min(len(tokens) - 1, len(tokens)//2))
+
+    i0 = max(0, center_idx - window_tokens)
+    i1 = min(len(tokens), center_idx + window_tokens + 1)
+    window = tokens[i0:i1]
+
+    def clean_tok(t):
+        t2 = t.strip().strip(",.;:()[]{}")
+        return t2
+
+    window = [clean_tok(t) for t in window if clean_tok(t)]
+
+    best = ''
+    best_score = -1
+    for n in range(2, 6):
+        for k in range(0, max(0, len(window) - n + 1)):
+            chunk = window[k:k+n]
+            if any(t.isdigit() for t in chunk):
+                continue
+            chunk_norm = [t.upper() for t in chunk]
+            if all(t in STOPWORDS_UPPER for t in chunk_norm):
+                continue
+            upper_ratio = sum(1 for t in chunk if t.isalpha() and t.isupper()) / n
+            alpha_ratio = sum(1 for t in chunk if any(ch.isalpha() for ch in t)) / n
+            score = upper_ratio * 1.2 + alpha_ratio
+            candidate = " ".join(chunk).strip()
+            candidate = re.sub(r"\b(CUIT|CUIL)\b[:#]?\s*\d+", "", candidate, flags=re.I).strip()
+            candidate = re.sub(r"\bS\.?A\.?\b", "S.A.", candidate)
+            if len(candidate) >= 4 and score > best_score:
+                best_score = score
+                best = candidate
+
+    return best
+
 # =========================
 # Lectura segura de Excel
 # =========================
 @st.cache_data
 def read_excel_bytes_from_buffer(buf_bytes, ext_hint=None):
-    if not buf_bytes: raise ValueError("Archivo vacío o no cargado.")
+    if not buf_bytes: 
+        raise ValueError("Archivo vacío o no cargado.")
     buf = io.BytesIO(buf_bytes)
+    ext = (ext_hint or '').lower()
     try:
-        if ext_hint and ext_hint.lower() == "xls":
+        if ext == "xls":
             return pd.read_excel(buf, dtype=str, engine="xlrd").fillna('')
         else:
             return pd.read_excel(buf, dtype=str, engine="openpyxl").fillna('')
     except Exception:
-        buf.seek(0); return pd.read_excel(buf, dtype=str).fillna('')
+        buf.seek(0)
+        try:
+            return pd.read_excel(buf, dtype=str).fillna('')
+        except Exception as e2:
+            raise ValueError(
+                f"No pude leer el Excel ({ext or 'desconocido'}). "
+                "Si es .XLS, asegurate de tener 'xlrd' instalado y que el archivo no esté protegido/corrupto. "
+                f"Detalle: {e2}"
+            )
 
 # =========================
-# Procesamiento principal
+# Procesamiento principal (modo comparado Personas vs Banco)
 # =========================
 @st.cache_data(show_spinner=False)
 def process_files(personas_bytes, banco_bytes, personas_name, banco_name, validate_cuit=True, show_unknown=True):
     personas = read_excel_bytes_from_buffer(personas_bytes, ext_hint=(personas_name.split('.')[-1] if personas_name else None))
     banco    = read_excel_bytes_from_buffer(banco_bytes,    ext_hint=(banco_name.split('.')[-1] if banco_name else None))
 
-    concepto_col = find_col(banco, ['concepto', 'concept'])
-    credito_col  = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto'])
-    fecha_col    = find_col(banco, ['fecha', 'date', 'fecha de'])
+    # Sinónimos ampliados
+    concepto_col = find_col(banco, ['concepto', 'concept', 'descripcion', 'descripción', 'detalle', 'detalle concepto'])
+    credito_col  = find_col(banco, ['crédito', 'credito', 'credit', 'importe', 'monto', 'acreditacion', 'acreditación', 'haber'])
+    fecha_col    = find_col(banco, ['fecha', 'date', 'fecha de', 'f. operación', 'f operación'])
     if not concepto_col: raise ValueError("No se encontró la columna de Concepto en el archivo bancario.")
     if not credito_col:  raise ValueError("No se encontró columna de Crédito/Importe/Monto en el archivo bancario.")
 
@@ -260,6 +406,16 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
     banco['Concepto_digits'] = banco['Concepto_str'].str.replace(r'\D', '', regex=True)
 
     matches_idx, found_map, listed_map = [], {}, {}
+    # Precompute cuit_raw map para fallback
+    cuit_raw_map = {}
+    for c_raw in personas['cuit_raw'].dropna().unique():
+        rn = str(c_raw).strip().lower()
+        if not rn:
+            continue
+        cd = only_digits(c_raw)
+        if (not validate_cuit) or cuit_is_valid(cd):
+            cuit_raw_map[rn] = cd
+
     for idx, row in banco.iterrows():
         concepto_digits = row['Concepto_digits']
         found_all = find_cuits_in_text(concepto_digits)
@@ -268,13 +424,11 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
         found = set(found_all) if show_unknown else found_listed
 
         if not found:
-            concepto = str(row.get(concepto_col, ''))
-            found_raw = set()
-            for c_raw in personas['cuit_raw'].dropna().unique():
-                if c_raw and c_raw.strip() and c_raw.lower() in concepto.lower():
-                    cd = only_digits(c_raw)
-                    if (not validate_cuit) or cuit_is_valid(cd): found_raw.add(cd)
-            found = found or found_raw; found_listed = found & cuit_set
+            # fallback por CUIT "raw" tal cual aparece en Personas dentro del concepto
+            concepto_lower = str(row.get(concepto_col, '')).lower()
+            found_raw = {cd for rn, cd in cuit_raw_map.items() if rn in concepto_lower}
+            found = found or found_raw
+            found_listed = found & cuit_set
 
         if found:
             matches_idx.append(idx)
@@ -331,7 +485,7 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
             df_detalle[f"{_col}_raw"] = df_detalle[_col].astype(str).replace('nan', '').replace('None', '')
             df_detalle[f"{_col}_num"] = pd.to_numeric(df_detalle[_col].replace('', pd.NA), errors='coerce')
 
-    cols_base = ['Fecha_str','Cuit/Cuil','CUIT_digits','CUIT listado','Nombre','Lote_raw','Golf_raw','Lote_num','Golf_num','Valor_formateado','Concepto encontrado']
+    cols_base = ['Fecha_str','Cuit/Cuil','CUIT_digits','CUIT listado','Nombre','Lote_raw','Golf_raw','Lote_num','Golf_num','Valor_formateado','Concepto encontrado','Valor_num']
     cols_base = [c for c in cols_base if c in df_detalle.columns]
     df_detalle_display = df_detalle[cols_base].copy().rename(columns={
         'Fecha_str': 'Fecha', 'Lote_raw': 'Lote', 'Golf_raw': 'Golf', 'Valor_formateado': 'Valor transferido'
@@ -384,6 +538,97 @@ def process_files(personas_bytes, banco_bytes, personas_name, banco_name, valida
     return df_detalle_display.copy(), res_sorted.copy(), kpis
 
 # =========================
+# Procesamiento (modo SOLO banco)
+# =========================
+@st.cache_data(show_spinner=False)
+def process_bank_only(banco_bytes, banco_name, validate_cuit=True, page_size=25):
+    banco = read_excel_bytes_from_buffer(
+        banco_bytes,
+        ext_hint=(banco_name.split('.')[-1] if banco_name else None)
+    )
+
+    concepto_col = find_col(banco, ['concepto','concept','descripcion','descripción','detalle','detalle concepto'])
+    credito_col  = find_col(banco, ['crédito','credito','credit','importe','monto','acreditacion','acreditación','haber'])
+    fecha_col    = find_col(banco, ['fecha','date','fecha de','f. operación','f operación'])
+
+    if not concepto_col:
+        raise ValueError("No se encontró la columna de Concepto en el archivo bancario.")
+    if not credito_col:
+        raise ValueError("No se encontró columna de Crédito/Importe/Monto en el archivo bancario.")
+
+    df = banco.copy()
+    df['Concepto_str'] = df[concepto_col].astype(str)
+
+    resultados = []
+    banco_cols = list(df.columns)
+
+    for idx, row in df.iterrows():
+        concepto = row['Concepto_str']
+        fecha_val = row.get(fecha_col, '') if fecha_col else ''
+        fecha_dt = pd.to_datetime(fecha_val, dayfirst=True, errors='coerce')
+
+        # Monto
+        credito_val = get_credit_value_from_row(row, credito_col, banco_cols, max_look_ahead=2)
+        credito_num = parse_money_ar(credito_val)
+
+        # CUITs en concepto
+        found = find_cuits_in_free_text(concepto)
+        if validate_cuit:
+            found = {c for c in found if cuit_is_valid(c)}
+
+        for cuit_d in sorted(found):
+            # Nombre/razón social detectado del texto alrededor del CUIT
+            nombre_guess = guess_name_around_cuit(concepto, cuit_d)
+            resultados.append({
+                'Fecha': fecha_dt,
+                'Cuit/Cuil': cuit_d,              # luego lo formateamos XX-XXXXXXXX-X
+                'Nombre detectado': nombre_guess,
+                'Valor_num': credito_num,
+                'Valor_raw': credito_val,
+                'Concepto': concepto
+            })
+
+    detalle = pd.DataFrame(resultados)
+    if detalle.empty:
+        return pd.DataFrame(), pd.DataFrame(), {
+            "Movimientos detectados": 0,
+            "CUITs únicos": 0,
+            "Monto total": "0,00"
+        }
+
+    # Formateos
+    detalle['Fecha'] = pd.to_datetime(detalle['Fecha'], dayfirst=True, errors='coerce')
+    detalle['Fecha'] = detalle['Fecha'].dt.strftime('%Y-%m-%d').fillna('')
+    # Formato CUIT XX-XXXXXXXX-X
+    def fmt_cuit(c):
+        c = str(c or '')
+        return f"{c[:2]}-{c[2:10]}-{c[10:]}" if re.fullmatch(r'\d{11}', c) else c
+    detalle['Cuit/Cuil'] = detalle['Cuit/Cuil'].astype(str).apply(fmt_cuit)
+    detalle['Valor transferido'] = detalle['Valor_num'].apply(lambda x: format_currency_ar(x) if pd.notna(x) else '')
+
+    # Reordenar columnas
+    det_cols = ['Fecha', 'Cuit/Cuil', 'Nombre detectado', 'Valor transferido', 'Concepto', 'Valor_num']
+    det_cols = [c for c in det_cols if c in detalle.columns]
+    detalle = detalle[det_cols].sort_values(['Cuit/Cuil', 'Fecha'])
+
+    # Resumen por CUIT + nombre detectado
+    res = detalle.copy()
+    res['Valor_num'] = pd.to_numeric(res['Valor_num'], errors='coerce').fillna(0)
+    resumen = res.groupby(['Cuit/Cuil','Nombre detectado'], as_index=False)['Valor_num'].sum()
+    resumen = resumen.rename(columns={'Valor_num':'Suma_total_num'})
+    resumen['Suma total'] = resumen['Suma_total_num'].apply(lambda v: format_currency_ar(v))
+
+    # KPIs
+    kpis = {
+        "Movimientos detectados": len(detalle),
+        "CUITs únicos": detalle['Cuit/Cuil'].nunique(),
+        "Monto total": format_currency_ar(pd.to_numeric(res['Valor_num'], errors='coerce').sum())
+    }
+
+    resumen_sorted = resumen.sort_values('Suma_total_num', ascending=False)
+    return detalle, resumen_sorted, kpis
+
+# =========================
 # HEADER / HERO
 # =========================
 with st.container():
@@ -410,29 +655,39 @@ st.write("")
 def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_icon=False, theme="streamlit"):
     df_display = df.copy()
 
-    # Asegurar strings en columnas textuales
-    for col in ['CUIT listado', 'Cuit/Cuil', 'Nombre', 'Lote', 'Golf', 'Fecha', 'Concepto encontrado']:
+    # Asegurar strings en columnas textuales si existen
+    for col in ['CUIT listado', 'Cuit/Cuil', 'Nombre', 'Nombre detectado', 'Lote', 'Golf', 'Fecha', 'Concepto', 'Concepto encontrado']:
         if col in df_display.columns:
             df_display[col] = df_display[col].astype(str)
 
     # "Iconito" robusto con emoji (no requiere HTML/JS)
     if enable_icon and 'CUIT listado' in df_display.columns:
-        df_display['CUIT listado'] = df_display['CUIT listado'].map(lambda v: '🟢 Sí' if v.strip().lower() == 'sí' else '🟣 No')
+        def to_icon(v):
+            s = str(v).strip().lower()
+            return '🟢 Sí' if s in ('sí', 'si', 'yes', 'y') else '🟣 No'
+        df_display['CUIT listado'] = df_display['CUIT listado'].map(to_icon)
 
     gb = GridOptionsBuilder.from_dataframe(df_display, enableValue=True, enableRowGroup=True, enablePivot=True)
     gb.configure_default_column(filterable=True, sortable=True, resizable=True)
     gb.configure_grid_options(domLayout='normal', rowHeight=36)
 
+    # 👉 columnas numéricas ocultas para ordenar por “valor real”
+    if 'Valor_num' in df_display.columns:
+        gb.configure_column('Valor_num', hide=True, type=['numericColumn'], sort='desc')
+    if 'Suma_total_num' in df_display.columns:
+        gb.configure_column('Suma_total_num', hide=True, type=['numericColumn'], sort='desc')
+
+    # Paginación
     if page_size is None:
         gb.configure_grid_options(pagination=False)
     else:
         gb.configure_pagination(paginationAutoPageSize=False, paginationPageSize=page_size)
 
     go = gb.build()
-    # Tooltips: por campo
+    # Tooltips
     if 'columnDefs' in go:
         for cdef in go['columnDefs']:
-            if cdef.get('field') in ('Concepto encontrado', 'Nombre'):
+            if cdef.get('field') in ('Concepto', 'Concepto encontrado', 'Nombre', 'Nombre detectado'):
                 cdef['tooltipField'] = cdef['field']
     go.setdefault('enableRangeSelection', True)
     go.setdefault('clipboardDelimiter', '\t')
@@ -443,8 +698,8 @@ def show_aggrid(df, height=400, page_size=25, key="aggrid", enable_icon=False, t
         height=height,
         data_return_mode=DataReturnMode.FILTERED_AND_SORTED,
         update_mode=GridUpdateMode.NO_UPDATE,
-        allow_unsafe_jscode=False,    # ya no usamos JS
-        theme=theme,                  # "streamlit" sigue el modo oscuro/claro de la app
+        allow_unsafe_jscode=False,    # sin JS
+        theme=theme,                  # respeta modo oscuro/claro
         key=key,
     )
 
@@ -481,40 +736,59 @@ with tab_cargar:
 
     st.write("")
     with st.form("procesar_form"):
-        st.info("Pulsa **Procesar** para extraer coincidencias.")
+        st.info("Pulsa **Procesar** para extraer coincidencias. Podés subir solo el Excel de banco (modo rápido).")
         submit = st.form_submit_button("🚀 Procesar")
         if submit:
             try:
-                if not st.session_state['uploaded_personas_bytes'] or not st.session_state['uploaded_banco_bytes']:
-                    st.warning("Subí **ambos** archivos antes de procesar.")
+                personas_ok = bool(st.session_state['uploaded_personas_bytes'])
+                banco_ok    = bool(st.session_state['uploaded_banco_bytes'])
+
+                if not banco_ok and not personas_ok:
+                    st.warning("Subí al menos el Excel de **movimientos**.")
                     st.stop()
 
-                df_detalle_display, res_sorted, kpis = process_files(
-                    st.session_state['uploaded_personas_bytes'],
-                    st.session_state['uploaded_banco_bytes'],
-                    st.session_state.get('uploaded_personas_name',''),
-                    st.session_state.get('uploaded_banco_name',''),
-                    validate_cuit=validate_cuit,
-                    show_unknown=show_unknown
-                )
+                if banco_ok and not personas_ok:
+                    # --- MODO SOLO BANCO ---
+                    df_detalle_display, res_sorted, kpis = process_bank_only(
+                        st.session_state['uploaded_banco_bytes'],
+                        st.session_state.get('uploaded_banco_name',''),
+                        validate_cuit=validate_cuit,
+                        page_size=st.session_state.get('page_size', 25)
+                    )
+                elif banco_ok and personas_ok:
+                    # --- MODO COMPARADO (lógica original) ---
+                    df_detalle_display, res_sorted, kpis = process_files(
+                        st.session_state['uploaded_personas_bytes'],
+                        st.session_state['uploaded_banco_bytes'],
+                        st.session_state.get('uploaded_personas_name',''),
+                        st.session_state.get('uploaded_banco_name',''),
+                        validate_cuit=validate_cuit,
+                        show_unknown=show_unknown
+                    )
+                else:
+                    st.warning("Para procesar Personas necesitás también el Excel de **movimientos**.")
+                    st.stop()
+
             except Exception as e:
                 st.error(f"Error en procesamiento: {e}")
                 with st.expander("Ver detalle técnico (traceback)"):
                     st.code(traceback.format_exc())
                 # depuración
                 try:
-                    personas_df = read_excel_bytes_from_buffer(
-                        st.session_state['uploaded_personas_bytes'],
-                        ext_hint=st.session_state.get('uploaded_personas_name','').split('.')[-1] if st.session_state.get('uploaded_personas_name') else None
-                    )
-                    banco_df = read_excel_bytes_from_buffer(
-                        st.session_state['uploaded_banco_bytes'],
-                        ext_hint=st.session_state.get('uploaded_banco_name','').split('.')[-1] if st.session_state.get('uploaded_banco_name') else None
-                    )
-                    st.markdown("**Primeras filas: Personas**")
-                    st.dataframe(personas_df.head(8))
-                    st.markdown("**Primeras filas: Banco**")
-                    st.dataframe(banco_df.head(8))
+                    if st.session_state.get('uploaded_personas_bytes'):
+                        personas_df = read_excel_bytes_from_buffer(
+                            st.session_state['uploaded_personas_bytes'],
+                            ext_hint=st.session_state.get('uploaded_personas_name','').split('.')[-1] if st.session_state.get('uploaded_personas_name') else None
+                        )
+                        st.markdown("**Primeras filas: Personas**")
+                        st.dataframe(personas_df.head(8))
+                    if st.session_state.get('uploaded_banco_bytes'):
+                        banco_df = read_excel_bytes_from_buffer(
+                            st.session_state['uploaded_banco_bytes'],
+                            ext_hint=st.session_state.get('uploaded_banco_name','').split('.')[-1] if st.session_state.get('uploaded_banco_name') else None
+                        )
+                        st.markdown("**Primeras filas: Banco**")
+                        st.dataframe(banco_df.head(8))
                 except Exception as e2:
                     st.text(f"No se pudieron leer para depuración: {e2}")
                 st.stop()
@@ -542,27 +816,44 @@ with tab_resultados:
         c1.metric("Movimientos detectados", f"{kpis.get('Movimientos detectados', 0):,}".replace(',', '.'))
         c2.metric("CUITs únicos", f"{kpis.get('CUITs únicos', 0):,}".replace(',', '.'))
         c3.metric("Monto total (aprox.)", kpis.get('Monto total', '0,00'))
-        c4.metric("CUITs no listados", f"{kpis.get('CUITs no listados', 0):,}".replace(',', '.'))
+        if 'CUITs no listados' in kpis:
+            c4.metric("CUITs no listados", f"{kpis.get('CUITs no listados', 0):,}".replace(',', '.'))
+        else:
+            c4.empty()
 
         st.write("")
         st.markdown("#### Detalle")
         df_det_show = st.session_state['df_detalle_display'].copy()
-        det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
-        det_cols = [c for c in det_cols if c in df_det_show.columns]
+
+        # columnas dinámicas (soporta ambos modos)
+        det_cols_candidates = [
+            'Fecha', 'Cuit/Cuil',
+            'CUIT listado', 'Nombre', 'Lote', 'Golf',            # modo comparado
+            'Nombre detectado',                                   # modo banco-only
+            'Valor transferido', 'Concepto', 'Concepto encontrado',
+            'Valor_num'                                           # numérica oculta para ordenar
+        ]
+        det_cols = [c for c in det_cols_candidates if c in df_det_show.columns]
         show_aggrid(
             df_det_show[det_cols],
             height=420,
             page_size=st.session_state.get('page_size', 25),
             key="grid_detalle_main",
-            enable_icon=True,        # <- iconito (emoji)
-            theme="streamlit"        # <- respeta modo oscuro de la app
+            enable_icon=True,
+            theme="streamlit"
         )
 
         st.write("")
         st.markdown("#### Resumen")
         res_sorted_df = st.session_state['res_sorted'].copy()
-        res_cols = ['Cuit/Cuil','Nombre','Lote','Golf','Suma total']
-        res_cols = [c for c in res_cols if c in res_sorted_df.columns]
+        res_cols_candidates = [
+            'Cuit/Cuil',
+            'Nombre',           # comparado
+            'Nombre detectado', # banco-only
+            'Lote','Golf',      # comparado
+            'Suma total', 'Suma_total_num'
+        ]
+        res_cols = [c for c in res_cols_candidates if c in res_sorted_df.columns]
         show_aggrid(
             res_sorted_df[res_cols],
             height=320,
@@ -580,7 +871,7 @@ with tab_resultados:
             if c in df_det_export.columns: df_det_export[c] = df_det_export[c].apply(safe_int_like_to_str)
         csv_det = df_det_export.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
 
-        df_res_export = res_sorted_df[res_cols + (['Suma_total_num'] if 'Suma_total_num' in res_sorted_df.columns else [])].copy()
+        df_res_export = res_sorted_df[res_cols].copy()
         for c in ['Lote','Golf']:
             if c in df_res_export.columns: df_res_export[c] = df_res_export[c].apply(safe_int_like_to_str)
         csv_res = df_res_export.to_csv(index=False, sep=';', encoding='utf-8-sig').encode('utf-8-sig')
@@ -604,40 +895,41 @@ with tab_buscar:
     if st.session_state.get('df_detalle_display') is None:
         st.info("No hay resultados procesados para buscar. Procesá primero.")
     else:
-        # Buscar por Lote
-        with st.expander("🏷️ Buscar por Lote"):
-            exact_lote = st.checkbox("Coincidencia exacta", value=False, key="exact_lote")
-            search_lote = st.text_input("Número de lote (ej: 41)", value=st.session_state.get('search_lote',''), key="input_lote")
-            if search_lote:
-                search_lower = str(search_lote).strip().lower()
-                df_det = st.session_state['df_detalle_display']
-                mask_det = (df_det['Lote'].astype(str).str.strip().str.lower() == search_lower) if exact_lote \
-                           else df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
-                matches_det = df_det.loc[mask_det].copy()
-                st.write(f"Coincidencias (detalle): **{len(matches_det)}**")
-                if len(matches_det) > 0:
-                    det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
-                    det_cols = [c for c in det_cols if c in matches_det.columns]
-                    show_aggrid(
-                        matches_det[det_cols], height=300, page_size=st.session_state.get('page_size', 25),
-                        key=f"grid_busq_lote_{search_lower}_{int(exact_lote)}", enable_icon=True, theme="streamlit"
-                    )
+        df_det = st.session_state['df_detalle_display'].copy()
 
-        # Buscar por palabra clave
+        # Buscar por Lote (solo si existe)
+        if 'Lote' in df_det.columns:
+            with st.expander("🏷️ Buscar por Lote"):
+                exact_lote = st.checkbox("Coincidencia exacta", value=False, key="exact_lote")
+                search_lote = st.text_input("Número de lote (ej: 41)", value=st.session_state.get('search_lote',''), key="input_lote")
+                if search_lote:
+                    search_lower = str(search_lote).strip().lower()
+                    mask_det = (df_det['Lote'].astype(str).str.strip().str.lower() == search_lower) if exact_lote \
+                               else df_det['Lote'].astype(str).str.lower().str.contains(search_lower, na=False)
+                    matches_det = df_det.loc[mask_det].copy()
+                    st.write(f"Coincidencias (detalle): **{len(matches_det)}**")
+                    if len(matches_det) > 0:
+                        det_cols = [c for c in ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado','Valor_num'] if c in matches_det.columns]
+                        show_aggrid(
+                            matches_det[det_cols], height=300, page_size=st.session_state.get('page_size', 25),
+                            key=f"grid_busq_lote_{search_lower}_{int(exact_lote)}", enable_icon=True, theme="streamlit"
+                        )
+
+        # Buscar por palabra clave (Concepto / Nombre)
         with st.expander("🧠 Buscar por palabra clave (Concepto / Nombre)", expanded=True):
             search_kw = st.text_input("Palabra clave", value=st.session_state.get('search_kw',''), key="input_kw")
             if search_kw:
                 kw_lower = str(search_kw).strip().lower()
-                df_det = st.session_state['df_detalle_display'].copy()
-                mask_kw = (
-                    df_det['Concepto encontrado'].astype(str).str.lower().str.contains(kw_lower, na=False) |
-                    df_det['Nombre'].astype(str).str.lower().str.contains(kw_lower, na=False)
-                )
-                matches_det_kw = df_det.loc[mask_kw].copy()
+                name_cols = [c for c in ['Nombre','Nombre detectado'] if c in df_det.columns]
+                concept_cols = [c for c in ['Concepto encontrado','Concepto'] if c in df_det.columns]
+                mask_kw = False
+                for c in concept_cols + name_cols:
+                    s = df_det[c].astype(str).str.lower().str.contains(kw_lower, na=False)
+                    mask_kw = s if isinstance(mask_kw, bool) else (mask_kw | s)
+                matches_det_kw = df_det.loc[mask_kw].copy() if not isinstance(mask_kw, bool) else df_det.iloc[0:0].copy()
                 st.write(f"Coincidencias (detalle): **{len(matches_det_kw)}**")
                 if len(matches_det_kw) > 0:
-                    det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
-                    det_cols = [c for c in det_cols if c in matches_det_kw.columns]
+                    det_cols = [c for c in ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Nombre detectado','Lote','Golf','Valor transferido','Concepto','Concepto encontrado','Valor_num'] if c in matches_det_kw.columns]
                     show_aggrid(
                         matches_det_kw[det_cols], height=300, page_size=st.session_state.get('page_size', 25),
                         key=f"grid_busq_kw_{kw_lower}", enable_icon=True, theme="streamlit"
@@ -655,14 +947,12 @@ with tab_buscar:
                 if q_digits == '':
                     st.warning("Ingresá al menos un dígito.")
                 else:
-                    df_det = st.session_state['df_detalle_display'].copy()
                     det_cuit_digits = df_det['Cuit/Cuil'].astype(str).apply(only_digits)
                     mask_det_cuit = (det_cuit_digits == q_digits) if exact_cuit else det_cuit_digits.str.contains(q_digits, na=False)
                     matches_det_cuit = df_det.loc[mask_det_cuit].copy()
                     st.write(f"Coincidencias (detalle): **{len(matches_det_cuit)}**")
                     if len(matches_det_cuit) > 0:
-                        det_cols = ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Lote','Golf','Valor transferido','Concepto encontrado']
-                        det_cols = [c for c in det_cols if c in matches_det_cuit.columns]
+                        det_cols = [c for c in ['Fecha','Cuit/Cuil','CUIT listado','Nombre','Nombre detectado','Lote','Golf','Valor transferido','Concepto','Concepto encontrado','Valor_num'] if c in matches_det_cuit.columns]
                         show_aggrid(
                             matches_det_cuit[det_cols], height=300, page_size=st.session_state.get('page_size', 25),
                             key=f"grid_busq_cuit_{q_digits}_{int(exact_cuit)}", enable_icon=True, theme="streamlit"
@@ -671,10 +961,10 @@ with tab_buscar:
 with tab_ajustes:
     st.markdown('### <span class="icon">⚙️</span>Ajustes y ayuda', unsafe_allow_html=True)
     st.markdown("""
-- **Grilla:** AG Grid con `theme="streamlit"` para que respete **oscuro/claro** de la app.
-- **Iconos CUIT listado:** se muestran como `🟢 Sí` / `🟣 No` (robustos, sin JS/HTML).
+- **Grilla:** AG Grid con `theme="streamlit"` para respetar **oscuro/claro**.
+- **Iconos CUIT listado:** `🟢 Sí` / `🟣 No` (sin JS/HTML).
 - **Descargas:** CSV con `;` y **BOM**; Excel con 2 hojas.
-- ¿Querés ordenar por *monto real*? Agregamos una columna oculta con `Valor_num` para ordenar por valor numérico y mantener el formato AR$ visible.
+- **Orden por monto real:** columnas numéricas ocultas (`Valor_num` / `Suma_total_num`) para ordenar sin perder el formato visible.
     """, unsafe_allow_html=True)
 
 st.caption(f"Versión de la app: {VERSION}")
